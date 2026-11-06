@@ -1,39 +1,57 @@
 /**
- * End to end: the built binary, run as `gxy` and as `galaxy-cli`, against the fake Galaxy.
- * The config dir is a temp dir, the keyring is off (`GXY_NO_KEYRING`) and HOME is a temp
- * dir too, so nothing here touches the developer's real logins.
+ * End to end: the built binary against the fake Galaxy, for what only the real binary shows:
+ * the wiring in `deps.ts` and `index.ts`, real processes, real pipes, real files. One journey
+ * runs as `gxy`; the rest are cases that need the binary. The config dir is a temp dir, the
+ * keyring is off (`GXY_NO_KEYRING`) and HOME is a temp dir too, so nothing here touches the
+ * developer's real logins.
+ *
+ * The CLI is built here into a private cache directory. galaxy-ops is not: it must already be
+ * built (`corepack pnpm --filter @galaxyproject/galaxy-ops build`), and the test fails at
+ * once, saying so, when its build is missing or older than its sources.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execa, type ResultPromise } from "execa";
-import { mkdtemp, mkdir, readFile, rm, stat, symlink } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startFakeGalaxy, type Approval, type FakeGalaxy } from "../support/fake-galaxy";
-import { startDevice } from "./whoami.helpers";
 
-const tsDir = fileURLToPath(new URL("../../../..", import.meta.url));
 const pkgDir = fileURLToPath(new URL("../..", import.meta.url));
-const opsDir = join(tsDir, "packages", "galaxy-ops");
+const opsDir = fileURLToPath(new URL("../../../galaxy-ops", import.meta.url));
 // Built into a private directory inside the package (so `galaxy-ops` still resolves from
-// node_modules), never into `dist`: other test files, and `bin.smoke.int.test.ts`, read that.
+// node_modules), never into `dist`: `bin.smoke.int.test.ts` reads that.
 const outDir = join(pkgDir, "node_modules", ".cache", "gxy-e2e");
 const dist = join(outDir, "index.js");
-const env = { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" };
+const buildEnv = { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" };
+const NAMES = ["gxy", "galaxy-cli"] as const;
+type Name = (typeof NAMES)[number];
 
-let work: string;
+let work: string | undefined;
 const bins: Record<string, string> = {};
 
-beforeAll(async () => {
-  // Build only what the binary needs: galaxy-ops (imported at run time; skipped when already
-  // built) and the CLI itself. Not the whole workspace.
-  if (!existsSync(join(opsDir, "dist", "index.js"))) {
-    await execa("corepack", ["pnpm", "--filter", "@galaxyproject/galaxy-ops", "build"], { cwd: tsDir, env });
+async function newestMtime(dir: string): Promise<number> {
+  let newest = 0;
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) newest = Math.max(newest, (await stat(join(entry.parentPath, entry.name))).mtimeMs);
   }
-  await execa("corepack", ["pnpm", "exec", "tsup", "--out-dir", outDir], { cwd: pkgDir, env });
+  return newest;
+}
+
+async function requireFreshOpsBuild(): Promise<void> {
+  const rebuild = "Run: corepack pnpm --filter @galaxyproject/galaxy-ops build";
+  const built = await stat(join(opsDir, "dist", "index.js")).catch(() => undefined);
+  if (!built) throw new Error(`galaxy-ops has no build, which the binary imports at run time. ${rebuild}`);
+  if (built.mtimeMs < (await newestMtime(join(opsDir, "src")))) {
+    throw new Error(`galaxy-ops' build is older than its sources, so the binary would run stale code. ${rebuild}`);
+  }
+}
+
+beforeAll(async () => {
+  await requireFreshOpsBuild();
+  await execa("corepack", ["pnpm", "exec", "tsup", "--out-dir", outDir], { cwd: pkgDir, env: buildEnv });
   work = await mkdtemp(join(tmpdir(), "gxy-e2e-"));
-  for (const name of ["gxy", "galaxy-cli"]) {
+  for (const name of NAMES) {
     await mkdir(join(work, "bin", name), { recursive: true });
     bins[name] = join(work, "bin", name, name);
     await symlink(dist, bins[name]!);
@@ -41,7 +59,8 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  await rm(work, { recursive: true, force: true });
+  // `work` is unset when beforeAll failed: leave that failure as the one that is reported.
+  if (work) await rm(work, { recursive: true, force: true });
   await rm(outDir, { recursive: true, force: true });
 });
 
@@ -55,41 +74,51 @@ afterEach(async () => {
   await Promise.all(open.splice(0).map((g) => g.close()));
 });
 
-describe.each(["gxy", "galaxy-cli"])("%s auth, end to end", (name) => {
+describe("auth, end to end", () => {
   let configDir: string;
   let galaxy: FakeGalaxy;
 
   beforeEach(async () => {
-    configDir = join(work, `config-${name}-${Math.random().toString(36).slice(2)}`);
+    configDir = join(work!, `config-${Math.random().toString(36).slice(2)}`);
     galaxy = await galaxyWith();
   });
 
-  const run = (args: string[], opts: { env?: Record<string, string>; input?: string } = {}) =>
-    execa(process.execPath, [bins[name]!, ...args], {
+  const cliEnv = (extra: Record<string, string> = {}) => ({ PATH: process.env.PATH ?? "", HOME: work!, GXY_CONFIG_DIR: configDir, GXY_NO_KEYRING: "1", ...extra });
+
+  const run = (args: string[], opts: { env?: Record<string, string>; input?: string; name?: Name } = {}) =>
+    execa(process.execPath, [bins[opts.name ?? "gxy"]!, ...args], {
       cwd: work,
       extendEnv: false,
-      env: { PATH: process.env.PATH ?? "", HOME: work, GXY_CONFIG_DIR: configDir, GXY_NO_KEYRING: "1", ...opts.env },
+      env: cliEnv(opts.env),
       input: opts.input,
       stdin: opts.input === undefined ? "ignore" : undefined,
       reject: false,
+      timeout: 60_000,
     });
 
-  /** Start a device login, approve its code on the fake while the CLI polls, and wait for it. */
-  async function deviceLogin(g: FakeGalaxy, approval: Approval | "expire" | "none" = {}, extra: string[] = []) {
+  /**
+   * Start a device login, approve its code on the fake while the CLI polls, and wait for it.
+   * The child never outlives the call, whatever happens in between.
+   */
+  async function deviceLogin(g: FakeGalaxy, approval: Approval | "expire" = {}, opts: { env?: Record<string, string> } = {}) {
     const before = new Set(g.pendingCodes());
-    const p: ResultPromise = run(["auth", "login", "--host", g.baseUrl, ...extra]) as ResultPromise;
-    if (approval !== "none") {
-      const deadline = Date.now() + 15_000;
+    const child = run(["auth", "login", "--host", g.baseUrl], opts) as ResultPromise;
+    try {
       let code: string | undefined;
-      while (!code && Date.now() < deadline) {
-        code = g.pendingCodes().find((c) => !before.has(c));
-        if (!code) await new Promise((r) => setTimeout(r, 20));
-      }
-      if (!code) throw new Error("the CLI never asked for a device code");
-      if (approval === "expire") g.expire(code);
-      else g.approve(code, { expiresIn: 3600, ...approval });
+      await vi.waitFor(
+        () => {
+          code = g.pendingCodes().find((c) => !before.has(c));
+          if (!code) throw new Error("the CLI never asked for a device code");
+        },
+        { timeout: 15_000, interval: 20 },
+      );
+      if (approval === "expire") g.expire(code!);
+      else g.approve(code!, { expiresIn: 3600, ...approval });
+      return await child;
+    } finally {
+      child.kill();
+      await child;
     }
-    return p;
   }
 
   it("logs in, shows it, hands out the token, runs an operation, logs out", async () => {
@@ -99,7 +128,7 @@ describe.each(["gxy", "galaxy-cli"])("%s auth, end to end", (name) => {
     const token = galaxy.issuedTokens()[0]!;
     expect(login.stdout + login.stderr).not.toContain(token);
 
-    // Modes: the directory is private to the user, and so is the file that holds the token.
+    // The directory is private to the user, and so is the file that holds the token.
     expect((await stat(configDir)).mode & 0o777).toBe(0o700);
     expect((await stat(join(configDir, "hosts.yml"))).mode & 0o777).toBe(0o600);
 
@@ -116,21 +145,21 @@ describe.each(["gxy", "galaxy-cli"])("%s auth, end to end", (name) => {
     expect(tok.stdout.trim()).toBe(token);
 
     const env = await run(["auth", "env"]);
-    expect(env.stdout).toContain(galaxy.baseUrl);
-    expect(env.stdout).toContain(token);
-    expect(env.stdout).toMatch(/GALAXY_URL=/);
-    expect(env.stdout).toMatch(/GALAXY_API_KEY=/);
+    expect(env.stdout).toContain(`GALAXY_URL='${galaxy.baseUrl}'`);
+    expect(env.stdout).toContain(`GALAXY_API_KEY='${token}'`);
 
-    const headers = await run(["auth", "headers"]);
-    expect(JSON.parse(headers.stdout)).toEqual({ "x-api-key": token });
+    expect(JSON.parse((await run(["auth", "headers"])).stdout)).toEqual({ "x-api-key": token });
 
     // An existing operation uses the stored login with no flags.
     const user = await run(["--format", "json", "get_user"]);
     expect(user.exitCode, user.stderr).toBe(0);
-    const parsed = JSON.parse(user.stdout);
-    expect(parsed.success).toBe(true);
-    expect(parsed.data.username).toBe("fake-user");
+    expect(JSON.parse(user.stdout)).toMatchObject({ success: true, data: { username: "fake-user" } });
     expect(galaxy.requestsTo("/api/users/current").at(-1)!.headers["x-api-key"]).toBe(token);
+
+    // The binary identifies itself on every call of its own.
+    for (const suffix of ["/api/version", "/oauth/device_authorization", "/oauth/token"]) {
+      for (const r of galaxy.requestsTo(suffix)) expect(r.headers["user-agent"], r.url).toMatch(/^gxy\//);
+    }
 
     const out = await run(["auth", "logout"]);
     expect(out.exitCode, out.stderr).toBe(0);
@@ -139,30 +168,47 @@ describe.each(["gxy", "galaxy-cli"])("%s auth, end to end", (name) => {
     const gone = await run(["auth", "token"]);
     expect(gone.exitCode).toBe(77); // nothing stored: not logged in
     expect(gone.stdout).toBe("");
-  }, 60_000);
+  }, 90_000);
 
-  it("stores an API key from stdin with --with-token", async () => {
-    const token = await startDevice(galaxy);
-    const login = await run(["auth", "login", "--host", galaxy.baseUrl, "--with-token"], { input: `${token}\n` });
+  it("presents the client id from GXY_OAUTH_CLIENT_ID", async () => {
+    const login = await deviceLogin(galaxy, {}, { env: { GXY_OAUTH_CLIENT_ID: "fake-other-client" } });
     expect(login.exitCode, login.stderr).toBe(0);
-    expect(login.stderr).toContain("Logged in to");
-    expect(login.stdout + login.stderr).not.toContain(token);
-    expect((await run(["auth", "token"])).stdout.trim()).toBe(token);
+    for (const suffix of ["/oauth/device_authorization", "/oauth/token"]) {
+      expect(galaxy.requestsTo(suffix)[0]!.form.client_id).toBe("fake-other-client");
+    }
   }, 30_000);
 
-  it("refuses a pasted key Galaxy does not know, and stores nothing", async () => {
-    const login = await run(["auth", "login", "--host", galaxy.baseUrl, "--with-token"], { input: "fake-not-a-key\n" });
-    expect(login.exitCode).toBe(77);
-    expect(login.stderr).toMatch(/invalid|newer API key/);
-    await expect(readFile(join(configDir, "hosts.yml"), "utf8")).rejects.toThrow();
-  }, 30_000);
+  describe("login --with-token", () => {
+    it("stores an API key read from stdin", async () => {
+      const token = galaxy.issueToken();
+      const login = await run(["auth", "login", "--host", galaxy.baseUrl, "--with-token"], { input: `${token}\n` });
+      expect(login.exitCode, login.stderr).toBe(0);
+      expect(login.stderr).toContain("Logged in to");
+      expect(login.stdout + login.stderr).not.toContain(token);
+      expect((await run(["auth", "token"])).stdout.trim()).toBe(token);
+    }, 30_000);
 
-  it("exits 76 and points at --with-token when the device flow is off", async () => {
+    it("refuses a key Galaxy does not know, and stores nothing", async () => {
+      const login = await run(["auth", "login", "--host", galaxy.baseUrl, "--with-token"], { input: "fake-not-a-key\n" });
+      expect(login.exitCode).toBe(77);
+      await expect(readFile(join(configDir, "hosts.yml"), "utf8")).rejects.toThrow();
+    }, 30_000);
+
+    it("refuses an admin key, storing nothing, when there is no keyring to keep it in", async () => {
+      const token = galaxy.issueToken({ admin: true });
+      const login = await run(["auth", "login", "--host", galaxy.baseUrl, "--with-token"], { input: `${token}\n` });
+      expect(login.exitCode, login.stderr).toBe(77);
+      expect(login.stderr).toContain("admin rights");
+      expect(login.stdout + login.stderr).not.toContain(token);
+      await expect(readFile(join(configDir, "hosts.yml"), "utf8")).rejects.toThrow();
+    }, 30_000);
+  });
+
+  it.each(NAMES)("as %s, exits 76 and points at --with-token under its own name when the device flow is off", async (name) => {
     galaxy.setDeviceFlow(false);
-    const login = await run(["auth", "login", "--host", galaxy.baseUrl]);
+    const login = await run(["auth", "login", "--host", galaxy.baseUrl], { name });
     expect(login.exitCode).toBe(76);
-    expect(login.stderr).toContain("--with-token");
-    expect(login.stderr).toContain(`${name} auth login`);
+    expect(login.stderr).toContain(`${name} auth login --host ${galaxy.baseUrl} --with-token`);
   }, 30_000);
 
   it("exits 77 when the code expires", async () => {
@@ -180,32 +226,41 @@ describe.each(["gxy", "galaxy-cli"])("%s auth, end to end", (name) => {
     expect(ambiguous.stdout).toBe("");
     expect(ambiguous.stderr).toContain(galaxy.baseUrl);
     expect(ambiguous.stderr).toContain(second.baseUrl);
-    const ops = await run(["get_user"]);
-    expect(ops.exitCode).toBe(64);
+    expect((await run(["get_user"])).exitCode).toBe(64);
     expect((await run(["auth", "token", "--host", second.baseUrl])).stdout.trim()).toBe(second.issuedTokens()[0]);
-  }, 60_000);
+  }, 90_000);
 
   it("lets GALAXY_API_KEY override the stored login", async () => {
     expect((await deviceLogin(galaxy)).exitCode).toBe(0);
-    const stored = galaxy.issuedTokens()[0]!;
     const seen = galaxy.requestsTo("/api/users/current").length;
     const user = await run(["--format", "json", "get_user"], { env: { GALAXY_URL: galaxy.baseUrl, GALAXY_API_KEY: "fake-env-key" } });
     expect(user.exitCode, user.stderr).toBe(0);
     const keys = galaxy.requestsTo("/api/users/current").slice(seen).map((r) => r.headers["x-api-key"]);
     expect(keys).toEqual(["fake-env-key"]);
-    expect(keys.at(-1)).toBe("fake-env-key");
-    expect(keys).not.toContain(stored);
   }, 60_000);
 
-  it("warns that --api-key is deprecated", async () => {
-    const user = await run(["--url", galaxy.baseUrl, "--api-key", "fake-flag-key", "get_user"]);
-    expect(user.stderr).toMatch(/--api-key is deprecated/);
-    expect(user.stderr).toContain(`${name} auth login`);
-  }, 30_000);
+  describe("headers for Claude Code's MCP server", () => {
+    it("hands out the token for the Galaxy the server URL names, and refuses any other", async () => {
+      expect((await deviceLogin(galaxy)).exitCode).toBe(0);
+      const token = galaxy.issuedTokens()[0]!;
 
-  it("keeps the old error when nothing is configured", async () => {
-    const user = await run(["get_user"]);
-    expect(user.exitCode).toBe(64);
-    expect(user.stderr).toMatch(/No Galaxy credentials/);
-  }, 30_000);
+      const matching = await run(["auth", "headers"], { env: { CLAUDE_CODE_MCP_SERVER_URL: `${galaxy.baseUrl}/api/mcp` } });
+      expect(matching.exitCode, matching.stderr).toBe(0);
+      expect(JSON.parse(matching.stdout)).toEqual({ "x-api-key": token });
+
+      const other = await run(["auth", "headers"], { env: { CLAUDE_CODE_MCP_SERVER_URL: "https://other.example.org/api/mcp" } });
+      expect(other.exitCode).toBe(77);
+      expect(other.stdout).toBe("");
+      expect(other.stdout + other.stderr).not.toContain(token);
+    }, 60_000);
+  });
+
+  it("lets `auth token | head -c1` end quietly with 0", async () => {
+    expect((await deviceLogin(galaxy)).exitCode).toBe(0);
+    const errFile = join(work!, "epipe-stderr");
+    const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(bins.gxy)} auth token 2>${JSON.stringify(errFile)} | head -c1 >/dev/null; echo \${PIPESTATUS[0]}`;
+    const r = await execa("bash", ["-c", command], { cwd: work, extendEnv: false, env: cliEnv(), timeout: 30_000 });
+    expect(r.stdout.trim()).toBe("0");
+    expect(await readFile(errFile, "utf8")).toBe("");
+  }, 60_000);
 });

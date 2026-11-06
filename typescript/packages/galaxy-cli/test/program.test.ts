@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { type ZodTypeAny } from "zod";
-import { buildProgram } from "../src/program";
+import { buildProgram, programName } from "../src/program";
 import { classifyField, inCliNames } from "../src/flags";
 import { allOperations, createGalaxyContext } from "@galaxyproject/galaxy-ops";
 
@@ -95,8 +95,26 @@ describe("buildProgram", () => {
     const names = program.commands.map((c) => c.name());
     expect(names).toContain("get_histories");
     expect(names).toContain("create_history");
-    // the `auth` group is the one non-operation command
-    expect(names.filter((n) => n !== "auth").length).toBe(allOperations.length);
+    // the `auth` group is the one command that is not an operation
+    expect(names).toContain("auth");
+    expect(names.length).toBe(allOperations.length + 1);
+  });
+
+  it("warns that --api-key is deprecated, pointing at `auth login`", async () => {
+    const run = await runCli(["--api-key", "fake-flag-key", "get_histories"], ctxFactory);
+    expect(run.stderr).toContain("--api-key is deprecated");
+    expect(run.stderr).toContain("galaxy-cli auth login");
+    expect(run.stderr).not.toContain("fake-flag-key");
+  });
+
+  it("exits 70 when an operation fails with a bug, and prints neither the key nor a response", async () => {
+    // A context without a client: the operation throws a TypeError, which is not a Galaxy error.
+    const secret = "fake-key-must-not-appear";
+    const run = await runCli(["get_histories"], () => ({ baseUrl: "https://g.example", apiKey: secret }) as unknown as ReturnType<typeof createGalaxyContext>);
+    expect(run.exitCode).toBe(70);
+    expect(run.stderr).toContain("TypeError");
+    expect(run.stdout).toBe("");
+    expect(run.stdout + run.stderr).not.toContain(secret);
   });
 
   it("says in --help what an op needs from the server", () => {
@@ -342,6 +360,16 @@ describe("buildProgram", () => {
  * was renamed. Derived here rather than imported from `flagName`, so a change to the
  * derivation is a failure rather than an agreement.
  */
+describe("programName", () => {
+  it("is gxy only when invoked as gxy", () => {
+    expect(programName("/usr/local/bin/gxy")).toBe("gxy");
+    expect(programName("/home/u/bin/gxy.cmd")).toBe("gxy");
+    expect(programName("/x/dist/index.js")).toBe("galaxy-cli");
+    expect(programName("/usr/bin/galaxy-cli")).toBe("galaxy-cli");
+    expect(programName(undefined)).toBe("galaxy-cli");
+  });
+});
+
 describe("the names the CLI gives an op's inputs", () => {
   const commands = new Map(
     buildProgram({ makeContext: ctxFactory }).commands.map((c) => [c.name(), c]),

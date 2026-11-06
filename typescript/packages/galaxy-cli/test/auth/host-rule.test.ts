@@ -4,7 +4,7 @@ import { pickHost, resolveHost } from "../../src/auth/host";
 import { normalizeBaseUrl } from "../../src/auth/base-url";
 import { loginCommand } from "../../src/auth/commands/login";
 import { AuthError, type LoginSummary } from "../../src/auth/types";
-import { harness, HOST } from "./fakes";
+import { harness, HOST } from "./harness";
 import { fakeLogin } from "./support";
 
 const stored = (...urls: string[]) => urls.map((u) => normalizeBaseUrl(u));

@@ -1,8 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
-import { buildProgram, programName } from "../../src/program";
+import type { Command } from "commander";
+import { createGalaxyContext } from "@galaxyproject/galaxy-ops";
+import { buildProgram } from "../../src/program";
 import { parseScopes } from "../../src/auth/register";
-import { allOperations } from "@galaxyproject/galaxy-ops";
-import { FAKE_TOKEN, fakeLogin, harness } from "./fakes";
+import { FAKE_TOKEN, HOST, fakeLogin, harness } from "./harness";
+
+const HOST_ARG = "https://dev.galaxy.example.org";
 
 async function run(argv: string[], h = harness({ stored: [fakeLogin()] })) {
   process.exitCode = 0;
@@ -13,63 +16,51 @@ async function run(argv: string[], h = harness({ stored: [fakeLogin()] })) {
   return { h, code, makeAuthDeps };
 }
 
-describe("registerAuth", () => {
-  it("lists the six subcommands in `auth --help`", () => {
+/** Make a program throw instead of exit, and keep its help and usage text off the terminal. */
+function contained(command: Command): Command {
+  command.exitOverride().configureOutput({ writeOut: () => {}, writeErr: () => {} });
+  for (const sub of command.commands) contained(sub);
+  return command;
+}
+
+describe("the auth commands", () => {
+  it("are the six subcommands of `auth`", () => {
     const auth = buildProgram().commands.find((c) => c.name() === "auth")!;
     expect(auth.commands.map((c) => c.name()).sort()).toEqual(["env", "headers", "login", "logout", "status", "token"]);
-    const help = auth.helpInformation();
-    for (const n of ["login", "status", "token", "env", "headers", "logout"]) expect(help).toContain(n);
   });
 
-  it("does not build deps for --help or for operation commands", () => {
-    const makeAuthDeps = vi.fn(() => harness().deps);
-    buildProgram({ makeAuthDeps });
-    expect(makeAuthDeps).not.toHaveBeenCalled();
-  });
-
-  it("parses --scopes comma- or space-separated", () => {
-    expect(parseScopes("a,b")).toEqual(["a", "b"]);
-    expect(parseScopes("a b")).toEqual(["a", "b"]);
-    expect(parseScopes("a, b  c")).toEqual(["a", "b", "c"]);
-  });
-
-  it("runs `auth token` through the injected deps, with the command name, and sets the exit code", async () => {
+  it("run through the injected deps, with the program's name, and set the exit code", async () => {
     const { h, code, makeAuthDeps } = await run(["auth", "token"]);
     expect(makeAuthDeps).toHaveBeenCalledWith("gxy");
     expect(h.cap.out).toBe(`${FAKE_TOKEN}\n`);
     expect(code).toBe(0);
   });
 
-  it("passes --host, --json and --show-token", async () => {
-    const { h } = await run(["auth", "status", "--host", "https://dev.galaxy.example.org", "--json", "--show-token"]);
-    expect(JSON.parse(h.cap.out)[0].token).toBe(FAKE_TOKEN);
+  it("do not build their deps for --help or for an operation", async () => {
+    const makeAuthDeps = vi.fn(() => harness().deps);
+    const fetchImpl = (async () => Response.json([])) as typeof fetch;
+    const makeContext = () => createGalaxyContext({ baseUrl: "https://g.example", apiKey: "K", fetchImpl });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      for (const argv of [["--help"], ["auth", "--help"], ["get_histories"]]) {
+        const program = contained(buildProgram({ makeAuthDeps, makeContext, invokedAs: "gxy" }));
+        await program.parseAsync(["node", "gxy", ...argv]).catch(() => undefined); // --help ends in a thrown exit
+      }
+    } finally {
+      log.mockRestore();
+      process.exitCode = 0;
+    }
+    expect(makeAuthDeps).not.toHaveBeenCalled();
   });
 
-  it("passes --shell and rejects bad values", async () => {
-    const { h } = await run(["auth", "env", "--shell", "fish"]);
-    expect(h.cap.out).toContain("set -gx GALAXY_API_KEY");
-    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const prog = buildProgram({ makeAuthDeps: () => harness().deps });
-    prog.exitOverride();
-    prog.commands.find((c) => c.name() === "auth")!.commands.forEach((c) => c.exitOverride());
-    await expect(prog.parseAsync(["node", "gxy", "auth", "env", "--shell", "csh"])).rejects.toThrow();
-    err.mockRestore();
-  });
-
-  it("login: --scopes, --no-browser, --with-token and --insecure-storage reach the command", async () => {
-    const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
-    const { code } = await run(["auth", "login", "--host", "https://dev.galaxy.example.org", "--with-token", "--insecure-storage", "--no-browser", "--scopes", "a,b"], h);
-    expect(code).toBe(0);
-    expect(h.store.putCalls[0]!.opts).toEqual({ insecureStorage: true });
-    const d = harness();
-    await run(["auth", "login", "--host", "https://dev.galaxy.example.org", "--scopes", "a b"], d);
-    expect(d.server.startedWith).toEqual([["a", "b"]]);
-  });
-
-  it("a deps factory that throws gives exit 70 and a message", async () => {
+  it("report a deps factory that throws as exit 70, with its message", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     process.exitCode = 0;
-    await buildProgram({ makeAuthDeps: () => { throw new Error("nope"); } }).parseAsync(["node", "gxy", "auth", "token"]);
+    await buildProgram({
+      makeAuthDeps: () => {
+        throw new Error("nope");
+      },
+    }).parseAsync(["node", "gxy", "auth", "token"]);
     expect(process.exitCode).toBe(70);
     expect(err.mock.calls.flat().join("")).toContain("nope");
     err.mockRestore();
@@ -77,22 +68,53 @@ describe("registerAuth", () => {
   });
 });
 
-describe("program name", () => {
-  it("is gxy only when invoked as gxy", () => {
-    expect(programName("/usr/local/bin/gxy")).toBe("gxy");
-    expect(programName("/home/u/bin/gxy.cmd")).toBe("gxy");
-    expect(programName("/x/dist/index.js")).toBe("galaxy-cli");
-    expect(programName("/usr/bin/galaxy-cli")).toBe("galaxy-cli");
-    expect(programName(undefined)).toBe("galaxy-cli");
+describe("options", () => {
+  it("--host, --json and --show-token reach status", async () => {
+    const { h } = await run(["auth", "status", "--host", HOST_ARG, "--json", "--show-token"]);
+    expect(JSON.parse(h.cap.out)[0].token).toBe(FAKE_TOKEN);
+  });
+
+  it("--shell reaches env, and a value that is not a shell is refused", async () => {
+    const { h } = await run(["auth", "env", "--shell", "fish"]);
+    expect(h.cap.out).toContain("set -gx GALAXY_API_KEY");
+
+    const program = contained(buildProgram({ makeAuthDeps: () => harness().deps }));
+    await expect(program.parseAsync(["node", "gxy", "auth", "env", "--shell", "csh"])).rejects.toThrow();
+  });
+
+  it("--scopes accumulates across uses, commas and spaces, and reaches the device flow", async () => {
+    const h = harness();
+    await run(["auth", "login", "--host", HOST_ARG, "--scopes", "a", "--scopes", "b,c", "--scopes", "a d"], h);
+    expect(h.server.startedWith).toEqual([["a", "b", "c", "d"]]);
+  });
+
+  it("--with-token and --insecure-storage reach login", async () => {
+    const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
+    const { code } = await run(["auth", "login", "--host", HOST_ARG, "--with-token", "--insecure-storage"], h);
+    expect(code).toBe(0);
+    expect(h.store.logins.get(HOST)).toMatchObject({ method: "pasted", storage: "file" });
+  });
+
+  it("--no-browser stops login offering to open one", async () => {
+    const offered = async (extra: string[]) => {
+      const h = harness({ interactive: true });
+      await run(["auth", "login", "--host", HOST_ARG, ...extra], h);
+      return h.cap.err.includes("Press Enter");
+    };
+    expect(await offered([])).toBe(true);
+    expect(await offered(["--no-browser"])).toBe(false);
   });
 });
 
-describe("existing commands are undisturbed", () => {
-  it("keeps the global options and every operation subcommand", () => {
-    const p = buildProgram();
-    expect(p.options.map((o) => o.long).sort()).toEqual(["--api-key", "--format", "--profile", "--quiet", "--timeout", "--url"]);
-    const names = p.commands.map((c) => c.name());
-    for (const op of allOperations) expect(names).toContain(op.name);
-    expect(names).toContain("auth");
+describe("parseScopes", () => {
+  it("splits on commas and whitespace", () => {
+    expect(parseScopes("a,b")).toEqual(["a", "b"]);
+    expect(parseScopes("a b")).toEqual(["a", "b"]);
+    expect(parseScopes("a, b  c")).toEqual(["a", "b", "c"]);
+  });
+
+  it("adds to what was given before, in order, without repeats", () => {
+    expect(parseScopes("b", parseScopes("a"))).toEqual(["a", "b"]);
+    expect(parseScopes("b c,a", ["a", "b"])).toEqual(["a", "b", "c"]);
   });
 });

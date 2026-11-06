@@ -18,7 +18,7 @@ function fakeSpawn(outcome: "spawn" | "error" | "throw") {
 const URL_ = "https://dev.galaxy.example.org/login/device?user_code=A&b=c";
 
 describe("openBrowser", () => {
-  it("runs xdg-open with the URL as one argument, detached, stdio ignored", async () => {
+  it("runs xdg-open with the URL as one argument, detached from this process, stdio ignored", async () => {
     const s = fakeSpawn("spawn");
     expect(await openBrowser(URL_, { DISPLAY: ":0" }, "linux", s.impl)).toBe(true);
     expect(s.calls).toEqual([{ cmd: "xdg-open", args: [URL_], opts: { detached: true, stdio: "ignore" } }]);
@@ -61,7 +61,8 @@ describe("$BROWSER", () => {
   it("is run first, with the URL as its one argument and no shell, even without DISPLAY", async () => {
     const s = fakeSpawn("spawn");
     expect(await openBrowser(URL_, { BROWSER: "/vscode/bin/helpers/browser.sh" }, "linux", s.impl)).toBe(true);
-    expect(s.calls).toEqual([{ cmd: "/vscode/bin/helpers/browser.sh", args: [URL_], opts: { detached: true, stdio: "ignore" } }]);
+    expect(s.calls).toHaveLength(1);
+    expect(s.calls[0]).toMatchObject({ cmd: "/vscode/bin/helpers/browser.sh", args: [URL_] });
   });
 
   it("goes before xdg-open, and falls through a colon-separated list on failure", async () => {

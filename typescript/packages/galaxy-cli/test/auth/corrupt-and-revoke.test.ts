@@ -11,7 +11,7 @@ import { createWhoami } from "../../src/auth/whoami";
 import type { AuthDeps, BaseUrl } from "../../src/auth/types";
 import { loadSourcesAsync, resolveConnection } from "../../src/config";
 import { startFakeGalaxy, type FakeGalaxy } from "../support/fake-galaxy";
-import { Capture } from "./fakes";
+import { Capture } from "./harness";
 import { FakeKeyring, fakeLogin } from "./support";
 import { PassThrough } from "node:stream";
 

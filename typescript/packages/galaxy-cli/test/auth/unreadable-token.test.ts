@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { logoutCommand } from "../../src/auth/commands/logout";
 import { statusCommand } from "../../src/auth/commands/status";
 import { AuthError } from "../../src/auth/types";
-import { FAKE_TOKEN, HOST, OTHER, fakeLogin, harness } from "./fakes";
+import { FAKE_TOKEN, HOST, OTHER, fakeLogin, harness } from "./harness";
 
 /** A store whose `get` fails for the given hosts, as a keyring that is down or has lost the secret does. */
 function breakGet(h: ReturnType<typeof harness>, hosts: string[], how: "throw" | "null" = "throw") {
