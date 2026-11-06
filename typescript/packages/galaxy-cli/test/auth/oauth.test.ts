@@ -190,16 +190,6 @@ describe("device login", () => {
     await expectAuthError(pending.waitForApproval(), "expired");
   });
 
-  it("rejects with expired at the local deadline even if the server never says so", async () => {
-    await start({ deviceExpiresIn: 0.15 });
-    // The server would answer expired_token itself; hide that by overriding with pending.
-    galaxy.setTokenOverride({ status: 400, body: JSON.stringify({ error: "authorization_pending" }) });
-    const server = await discover(url());
-    const pending = await server.startDeviceLogin();
-    // Keep the entry from turning into expired_token server-side: it is the override that answers.
-    await expectAuthError(pending.waitForApproval(), "expired");
-  });
-
   it("rejects with protocol when the device authorization response is malformed", async () => {
     galaxy.setDeviceAuthorizationOverride({ status: 200, body: "{nope" });
     const server = await discover(url());
@@ -219,19 +209,6 @@ describe("device login", () => {
     await expectAuthError(pending.waitForApproval(), "protocol");
   });
 
-  it("aborts cleanly on the signal, with the signal's reason", async () => {
-    const server = await discover(url());
-    const pending = await server.startDeviceLogin();
-    const controller = new AbortController();
-    const done = pending.waitForApproval(controller.signal);
-    await vi.waitFor(() => expect(galaxy.requestsTo("/oauth/token").length).toBeGreaterThanOrEqual(1));
-    controller.abort(new Error("user pressed ctrl-c"));
-    await expect(done).rejects.toThrow("user pressed ctrl-c");
-    const polls = galaxy.requestsTo("/oauth/token").length;
-    await new Promise((r) => setTimeout(r, 60));
-    expect(galaxy.requestsTo("/oauth/token").length).toBe(polls);
-  });
-
   it("aborts at once when the signal is already aborted", async () => {
     const server = await discover(url());
     const pending = await server.startDeviceLogin();
@@ -242,16 +219,186 @@ describe("device login", () => {
   });
 });
 
-describe("polling interval", () => {
-  /** Let real socket I/O finish: fake timers do not cover it. */
-  const flush = async () => {
-    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
-  };
-  const advance = async (ms: number) => {
-    await vi.advanceTimersByTimeAsync(ms);
-    await flush();
-  };
+/** Let real socket I/O finish: fake timers do not cover it. */
+const flush = async () => {
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+};
+const advance = async (ms: number) => {
+  await vi.advanceTimersByTimeAsync(ms);
+  await flush();
+};
 
+describe("endpoints must be on the issuer's origin", () => {
+  beforeEach(() => start());
+
+  it.each(["device_authorization_endpoint", "token_endpoint", "revocation_endpoint"])("refuses a %s on another origin", async (field) => {
+    galaxy.setMetadataOverrides({ [field]: "http://127.0.0.1:1/elsewhere" });
+    const err = await discover(url()).then(() => undefined, (e: unknown) => e);
+    expect(err).toBeInstanceOf(AuthError);
+    expect((err as AuthError).kind).toBe("insecure");
+    expect((err as AuthError).message).toContain(field);
+  });
+
+  it("refuses an endpoint that is not a URL", async () => {
+    galaxy.setMetadataOverrides({ token_endpoint: "not a url" });
+    await expectAuthError(discover(url()), "insecure");
+  });
+
+  it("accepts endpoints on the same origin under another path", async () => {
+    galaxy.setMetadataOverrides({ revocation_endpoint: `${galaxy.baseUrl}/somewhere/else` });
+    await expect(discover(url())).resolves.toMatchObject({ supportsRevocation: true });
+  });
+});
+
+describe("cancelling", () => {
+  beforeEach(() => start());
+
+  it("passes the signal to discovery: an abort during it rejects with the reason", async () => {
+    const controller = new AbortController();
+    const slowFetch: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true }));
+    const p = discover(url(), { fetch: slowFetch, signal: controller.signal });
+    controller.abort(new Error("ctrl-c"));
+    await expect(p).rejects.toThrow("ctrl-c");
+  });
+
+  it("creates no device code when the signal was aborted before startDeviceLogin", async () => {
+    const controller = new AbortController();
+    const server = await discover(url(), { signal: controller.signal });
+    controller.abort(new Error("ctrl-c"));
+    await expect(server.startDeviceLogin()).rejects.toThrow("ctrl-c");
+    expect(galaxy.requestsTo("/oauth/device_authorization")).toHaveLength(0);
+  });
+
+  it("aborts polling with the signal's reason and polls no more", async () => {
+    await start({ interval: 1 });
+    const server = await discover(url());
+    const pending = await server.startDeviceLogin();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const controller = new AbortController();
+    const done = pending.waitForApproval(controller.signal);
+    done.catch(() => undefined);
+    await advance(1100);
+    expect(galaxy.requestsTo("/oauth/token")).toHaveLength(1);
+    controller.abort(new Error("user pressed ctrl-c"));
+    await expect(done).rejects.toThrow("user pressed ctrl-c");
+    await advance(10_000);
+    expect(galaxy.requestsTo("/oauth/token")).toHaveLength(1);
+  });
+
+  it("rejects with expired at the local deadline even if the server never says so", async () => {
+    // The server stays pending (Date is not faked, so it never notices the time passing).
+    await start({ interval: 100, deviceExpiresIn: 250 });
+    const server = await discover(url());
+    const pending = await server.startDeviceLogin();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const done = pending.waitForApproval();
+    const outcome = done.then(() => undefined, (e: unknown) => e);
+    await advance(100_500);
+    await advance(100_000);
+    expect(galaxy.requestsTo("/oauth/token").length).toBeGreaterThanOrEqual(2);
+    await advance(60_000);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(AuthError);
+    expect((err as AuthError).kind).toBe("expired");
+  });
+});
+
+describe("transient failures while polling", () => {
+  beforeEach(() => start());
+  const tokenRequests = () => galaxy.requestsTo("/oauth/token").length;
+
+  it("keeps polling through connection resets, then succeeds", async () => {
+    const server = await discover(url());
+    const pending = await server.startDeviceLogin();
+    galaxy.failTokenPolls(2, { reset: true });
+    galaxy.approve(pending.userCode, { scopes: ["read"] });
+    await expect(pending.waitForApproval()).resolves.toMatchObject({ accessToken: "fake-access-token-1" });
+    expect(tokenRequests()).toBe(3);
+  });
+
+  it.each([502, 503, 504])("keeps polling through an HTML %i", async (status) => {
+    const server = await discover(url());
+    const pending = await server.startDeviceLogin();
+    galaxy.failTokenPolls(2, { status });
+    galaxy.approve(pending.userCode);
+    await expect(pending.waitForApproval()).resolves.toMatchObject({ accessToken: "fake-access-token-1" });
+    expect(tokenRequests()).toBe(3);
+  });
+
+  it("keeps polling through a 500 with an OAuth error body", async () => {
+    const server = await discover(url());
+    const pending = await server.startDeviceLogin();
+    galaxy.failTokenPolls(1, { status: 500, body: JSON.stringify({ error: "server_error" }) });
+    galaxy.approve(pending.userCode);
+    await expect(pending.waitForApproval()).resolves.toMatchObject({ accessToken: "fake-access-token-1" });
+  });
+
+  it("fails fast on any other OAuth error: one request, no retry", async () => {
+    const server = await discover(url());
+    const pending = await server.startDeviceLogin();
+    galaxy.setTokenOverride({ status: 400, body: JSON.stringify({ error: "server_error" }) });
+    await expectAuthError(pending.waitForApproval(), "protocol");
+    expect(tokenRequests()).toBe(1);
+  });
+
+  it("fails fast on a 4xx that is not 429", async () => {
+    const server = await discover(url());
+    const pending = await server.startDeviceLogin();
+    galaxy.failTokenPolls(5, { status: 403 });
+    await expectAuthError(pending.waitForApproval(), "protocol");
+    expect(tokenRequests()).toBe(1);
+  });
+
+  it("fails fast on a certificate error", async () => {
+    let attempts = 0;
+    const tlsFetch: typeof fetch = (input, init) => {
+      if (!String(input instanceof Request ? input.url : input).endsWith("/oauth/token")) return fetch(input, init);
+      attempts += 1;
+      return Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }) }));
+    };
+    const server = await discover(url(), { fetch: tlsFetch });
+    const pending = await server.startDeviceLogin();
+    const err = await pending.waitForApproval().then(() => undefined, (e: unknown) => e);
+    expect(err).toBeInstanceOf(AuthError);
+    expect((err as AuthError).kind).toBe("network");
+    expect((err as AuthError).message).toContain("secure connection");
+    expect(attempts).toBe(1);
+  });
+
+  it("still ends at the code's deadline when the server keeps failing", async () => {
+    await start({ interval: 100, deviceExpiresIn: 250 });
+    const server = await discover(url());
+    const pending = await server.startDeviceLogin();
+    galaxy.failTokenPolls(1000, { status: 502 });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const outcome = pending.waitForApproval().then(() => undefined, (e: unknown) => e);
+    for (let i = 0; i < 6; i++) await advance(100_000);
+    const err = await outcome;
+    expect((err as AuthError).kind).toBe("expired");
+  });
+
+  it("waits out a 429's Retry-After before polling again", async () => {
+    await start({ interval: 1 });
+    const server = await discover(url());
+    const pending = await server.startDeviceLogin();
+    galaxy.failTokenPolls(1, { status: 429, headers: { "retry-after": "20" } });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const done = pending.waitForApproval();
+    done.catch(() => undefined);
+    await advance(1100); // first poll: 429
+    expect(tokenRequests()).toBe(1);
+    await advance(19_000);
+    expect(tokenRequests()).toBe(1);
+    await advance(3_300);
+    expect(tokenRequests()).toBe(2);
+    galaxy.approve(pending.userCode);
+    await advance(1_100);
+    await expect(done).resolves.toMatchObject({ accessToken: "fake-access-token-1" });
+  });
+});
+
+describe("polling interval", () => {
   it("waits the server's interval before the first poll and between polls", async () => {
     await start({ interval: 2 });
     const server = await discover(url());

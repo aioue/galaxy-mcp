@@ -14,6 +14,13 @@ function rootCause(err: Error): Error {
   return e;
 }
 
+/** Whether a failed request died on certificate or TLS trouble: retrying cannot fix that. */
+export function isTlsError(err: Error): boolean {
+  const cause = rootCause(err);
+  const code = codeOf(cause);
+  return (code !== undefined && TLS_CODES.test(code)) || /certificate|self.signed|TLS|SSL/i.test(cause.message);
+}
+
 /**
  * The message for a request that never got an answer, naming the fixes that exist.
  *
@@ -25,9 +32,7 @@ function rootCause(err: Error): Error {
 export function describeNetworkError(err: Error, target: string): string {
   const cause = rootCause(err);
   const detail = sanitize(cause.message || err.message);
-  const code = codeOf(cause);
-  const tls = (code !== undefined && TLS_CODES.test(code)) || /certificate|self.signed|TLS|SSL/i.test(cause.message);
-  if (tls) {
+  if (isTlsError(err)) {
     return (
       `Could not make a secure connection to ${target}: ${detail}. ` +
       "If it uses a certificate from a private CA, set NODE_EXTRA_CA_CERTS to the CA's PEM file and try again. " +

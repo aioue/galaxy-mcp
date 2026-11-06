@@ -149,13 +149,13 @@ export interface AuthIo {
 export interface AuthDeps {
   store: CredentialStore;
   /** RFC 8414 discovery against the Galaxy at `baseUrl`. Rejects with an `AuthError`. */
-  discover(baseUrl: BaseUrl): Promise<AuthServer>;
+  discover(baseUrl: BaseUrl, signal?: AbortSignal): Promise<AuthServer>;
   /**
    * Ask Galaxy whose token this is (`GET /api/users/current` through galaxy-ops' `get_user`).
    * Rejects with `AuthError("not_logged_in")` when Galaxy refuses the token or answers with
    * the anonymous user (no username), which is what it does for a session without a valid key.
    */
-  whoami(baseUrl: BaseUrl, token: string): Promise<WhoAmI>;
+  whoami(baseUrl: BaseUrl, token: string, signal?: AbortSignal): Promise<WhoAmI>;
   /**
    * Which Galaxy a command means: the explicit `--host`, else `GALAXY_URL`, else the only
    * stored login. Rejects with `AuthError("ambiguous_host")` listing the stored hosts when

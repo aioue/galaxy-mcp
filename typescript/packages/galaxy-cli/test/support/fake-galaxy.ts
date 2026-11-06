@@ -103,6 +103,17 @@ export interface FakeGalaxy {
    * follow a redirect with credentials attached.
    */
   setRedirect(pathSuffix: string, location: string | null, status?: number): void;
+  /**
+   * The next `n` token polls fail before anything else: `{ reset: true }` destroys the
+   * socket, otherwise the response is `status` with the given headers (a 502, a 429...).
+   */
+  failTokenPolls(n: number, fault: { reset: true } | { status: number; headers?: Record<string, string>; body?: string }): void;
+  /** Merge these fields over the discovery metadata (e.g. an endpoint on another origin). */
+  setMetadataOverrides(fields: Record<string, unknown> | null): void;
+  /** Make the device authorization response carry this `verification_uri`. */
+  setVerificationUri(uri: string | null): void;
+  /** Make `/api/users/current` answer this status with an empty JSON body; `null` restores it. */
+  setUsersCurrentStatus(status: number | null): void;
   /** Revoke from the server side, as an admin or expiry would. */
   revokeToken(token: string): void;
   /** Tokens issued so far, in order. */
@@ -163,6 +174,12 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     res.end(r.body);
   };
 
+  let tokenFaults = 0;
+  let tokenFault: Parameters<FakeGalaxy["failTokenPolls"]>[1] = { reset: true };
+  let metadataOverrides: Record<string, unknown> = {};
+  let verificationUri: string | null = null;
+  let usersCurrentStatus: number | null = null;
+
   const metadata = () => ({
     issuer: metadataMode === "wrong-issuer" ? "https://not-this-galaxy.example" : baseUrl,
     ...(deviceFlow ? { device_authorization_endpoint: `${baseUrl}/oauth/device_authorization` } : {}),
@@ -171,6 +188,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     grant_types_supported: deviceFlow ? [DEVICE_GRANT] : [],
     scopes_supported: ["read", "write"],
     token_endpoint_auth_methods_supported: ["none"],
+    ...metadataOverrides,
   });
 
   const tokenIsValid = (t: TokenEntry | undefined): t is TokenEntry =>
@@ -229,13 +247,19 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
       return json(res, 200, {
         device_code: entry.deviceCode,
         user_code: entry.userCode,
-        verification_uri: `${baseUrl}/oauth/device`,
+        verification_uri: verificationUri ?? `${baseUrl}/oauth/device`,
         expires_in: deviceExpiresIn,
         interval,
       });
     }
 
     if (method === "POST" && local === "/oauth/token") {
+      if (tokenFaults > 0) {
+        tokenFaults -= 1;
+        if ("reset" in tokenFault) return void req.socket.destroy();
+        res.writeHead(tokenFault.status, { "content-type": "text/html", ...tokenFault.headers });
+        return void res.end(tokenFault.body ?? "<html>fault</html>");
+      }
       if (form.grant_type !== DEVICE_GRANT) return json(res, 400, { error: "unsupported_grant_type" });
       const entry = [...devices.values()].find((d) => d.deviceCode === form.device_code);
       if (!entry) return json(res, 400, { error: "invalid_grant" });
@@ -290,6 +314,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     }
 
     if (method === "GET" && local === "/api/users/current") {
+      if (usersCurrentStatus !== null) return json(res, usersCurrentStatus, {});
       const key = req.headers["x-api-key"];
       const t = typeof key === "string" ? tokens.get(key) : undefined;
       if (tokenIsValid(t)) return json(res, 200, { id: `fake-id-${t.username}`, username: t.username, email: t.email, is_admin: t.admin });
@@ -336,6 +361,13 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     setInvalidKeyResponse: (k) => void (invalidKey = k),
     setDeviceAuthorizationOverride: (r) => void (deviceOverride = r),
     setTokenOverride: (r) => void (tokenOverride = r),
+    failTokenPolls(n, fault) {
+      tokenFaults = n;
+      tokenFault = fault;
+    },
+    setMetadataOverrides: (f) => void (metadataOverrides = f ?? {}),
+    setVerificationUri: (u) => void (verificationUri = u),
+    setUsersCurrentStatus: (c) => void (usersCurrentStatus = c),
     setRedirect(suffix, location, status = 302) {
       if (location === null) redirects.delete(suffix);
       else redirects.set(suffix, { location, status });

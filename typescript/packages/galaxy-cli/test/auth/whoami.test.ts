@@ -44,6 +44,38 @@ describe("whoami (rule 1)", () => {
     await rejects(createWhoami()(base(), "not-a-real-token"), "not_logged_in");
   });
 
+  it("calls a 404 a non-Galaxy address, not a bad token", async () => {
+    galaxy.setUsersCurrentStatus(404);
+    const e = await rejects(createWhoami()(base(), "fake-token-xyz"), "protocol");
+    expect(e.message).toMatch(/does not look like a Galaxy API/);
+    expect(e.message).not.toMatch(/invalid|expired/);
+  });
+
+  it("calls a 429 rate limiting (network kind, retry later), not a bad token", async () => {
+    galaxy.setUsersCurrentStatus(429);
+    const e = await rejects(createWhoami()(base(), "fake-token-xyz"), "network");
+    expect(e.message).toMatch(/rate-limiting.*try again/);
+  });
+
+  it("calls a 503 a network error", async () => {
+    galaxy.setUsersCurrentStatus(503);
+    await rejects(createWhoami()(base(), "fake-token-xyz"), "network");
+  });
+
+  it("still calls a 401 a refused token", async () => {
+    galaxy.setUsersCurrentStatus(401);
+    await rejects(createWhoami()(base(), "fake-token-xyz"), "not_logged_in");
+  });
+
+  it("stops when the signal is already aborted, sending no token", async () => {
+    const t = await token();
+    const controller = new AbortController();
+    controller.abort(new Error("ctrl-c"));
+    galaxy.requests.length = 0;
+    await expect(createWhoami()(base(), t, controller.signal)).rejects.toThrow("ctrl-c");
+    expect(galaxy.requestsTo("/api/users/current")).toHaveLength(0);
+  });
+
   it("uses only /api/users/current", async () => {
     await createWhoami()(base(), await token());
     const paths = galaxy.requests.filter((r) => r.url.startsWith("/api/")).map((r) => r.url);
