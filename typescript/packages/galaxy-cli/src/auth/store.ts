@@ -51,9 +51,14 @@ export class CombinedStore implements CredentialStore {
         }
         storage = "keyring";
       } catch (e) {
-        if (opts.requireKeyring) {
-          // Nothing has been written yet (the file is only touched below), so refusing is clean.
+        // The write may have landed even though it did not read back (or the read threw). Take
+        // it out, best effort, so no copy of the token lives outside the record that is about
+        // to say "file", unless an existing record points at that very entry.
+        if (!(prior?.storage === "keyring" && prior.username === login.username)) {
           await this.keyring.delete(login.baseUrl, login.username).catch(() => {});
+        }
+        if (opts.requireKeyring) {
+          // Nothing has been written to the file yet (it is only touched below), so refusing is clean.
           throw new AuthError(
             "denied",
             `No system keyring here, so nothing was stored. Rerun with --insecure-storage to keep it in ${this.file.path} (readable only by you), or use GALAXY_API_KEY for this session.`,

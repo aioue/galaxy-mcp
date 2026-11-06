@@ -157,11 +157,12 @@ export interface AuthDeps {
    */
   whoami(baseUrl: BaseUrl, token: string, signal?: AbortSignal): Promise<WhoAmI>;
   /**
-   * Which Galaxy a command means: the explicit `--host`, else `GALAXY_URL`, else the only
-   * stored login. Rejects with `AuthError("ambiguous_host")` listing the stored hosts when
+   * Which Galaxy a command means: `--host`/`--url`, `GALAXY_URL` (env, then `.env`), the
+   * `--profile` URL, then the only stored login (see `pickHost`). With `purpose: "login"` the
+   * `.env` and profile are never consulted. Rejects with `AuthError("ambiguous_host")` listing the stored hosts when
    * several are stored and none was named, and `AuthError("usage")` when none is stored.
    */
-  resolveHost(explicit?: string): Promise<BaseUrl>;
+  resolveHost(explicit?: string, purpose?: "login"): Promise<BaseUrl>;
   /** Open a URL in the user's browser. Resolves false when there is no browser to open. */
   openBrowser(url: string): Promise<boolean>;
   /** Whether `openBrowser` has any chance (a display exists). Absent means "assume yes". */

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { normalizeBaseUrl } from "./auth/base-url";
+import { NoHostError, pickHost } from "./auth/host";
 import { createCredentialStore } from "./auth/store";
 import { describeExpiry, isExpired } from "./auth/expiry";
 import { AuthError, type BaseUrl, type CredentialStore, type StoredLogin } from "./auth/types";
@@ -25,18 +26,29 @@ export interface Sources {
   storeProblem?: string;
 }
 
+/** Which Galaxy an operation talks to: `auth/host.ts`'s one rule, fed from these sources. */
+function pickOperationHost(flags: GlobalFlags, src: Sources): string {
+  const prof = flags.profile ? src.profiles[flags.profile] : undefined;
+  return pickHost({
+    flag: flags.url,
+    env: src.env,
+    dotenv: src.dotenv,
+    profileUrl: prof?.galaxy_url,
+    storedBaseUrls: src.storedBaseUrls ?? [],
+  }).url;
+}
+
 /** Pure resolver -- sources injected so it is fully testable. */
 export function resolveConnection(flags: GlobalFlags, src: Sources): Connection {
   const prof = flags.profile ? src.profiles[flags.profile] : undefined;
-  const stored = src.storedBaseUrls ?? [];
-  const configuredUrl = flags.url ?? src.env.GALAXY_URL ?? src.dotenv.GALAXY_URL ?? prof?.galaxy_url;
-  if (!configuredUrl && stored.length > 1) {
-    throw new AuthError(
-      "ambiguous_host",
-      `Logged in to several Galaxies; say which with --url or GALAXY_URL:\n${stored.map((u) => `  ${u}`).join("\n")}`,
-    );
+  // The same rule as `gxy auth *` (auth/host.ts). With nothing named and nothing stored the
+  // generic "no credentials" error below says what to do, so that case is not an error here.
+  let baseUrl: string | undefined;
+  try {
+    baseUrl = pickOperationHost(flags, src);
+  } catch (e) {
+    if (!(e instanceof NoHostError)) throw e;
   }
-  const baseUrl = configuredUrl ?? (stored.length === 1 ? stored[0] : undefined);
 
   // An explicit key always wins, exactly as before stored logins existed.
   const explicitKey = flags.apiKey ?? src.env.GALAXY_API_KEY;
@@ -104,19 +116,17 @@ export async function loadSourcesAsync(
   if (flags.apiKey || src.env.GALAXY_API_KEY) return { ...src, now };
   try {
     const store = opts.store ?? createCredentialStore(src.env);
-    const prof = flags.profile ? src.profiles[flags.profile] : undefined;
-    const url = flags.url ?? src.env.GALAXY_URL ?? src.dotenv.GALAXY_URL ?? prof?.galaxy_url;
     const summaries = await store.list();
     const storedBaseUrls = summaries.map((s) => s.baseUrl);
     let target: BaseUrl | undefined;
-    if (url) {
-      try {
-        target = normalizeBaseUrl(url);
-      } catch {
-        target = undefined;
-      }
-    } else if (storedBaseUrls.length === 1) {
-      target = storedBaseUrls[0];
+    try {
+      // Only a host that matches a stored login exactly gets its token: a `.env` or profile
+      // that names another Galaxy finds no login here, so nothing is sent there.
+      target = normalizeBaseUrl(pickOperationHost(flags, { ...src, storedBaseUrls }));
+    } catch (e) {
+      // Ambiguity is reported by resolveConnection; an unparsable URL has no stored login.
+      if (!(e instanceof AuthError)) throw e;
+      target = undefined;
     }
     const storedLogin = target && storedBaseUrls.includes(target) ? ((await store.get(target)) ?? undefined) : undefined;
     return { ...src, storedBaseUrls, ...(storedLogin ? { storedLogin } : {}), now };

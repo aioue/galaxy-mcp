@@ -76,6 +76,15 @@ has time to do its job. If the keyring cannot be read, `auth logout` still remov
 record (it says the token was not revoked and may remain valid until it expires) and `auth status`
 reports that host as "token unavailable" and exits 1.
 
+Which Galaxy is meant, for `auth` and for operations alike: `--host`/`--url`, then `GALAXY_URL` in
+the environment, then in `.env`, then the `--profile` URL, then the only stored login. A stored
+token is only sent to the host it was issued for. `auth login` never takes its host from `.env` or a
+profile (a repository must not choose where your key goes): give `--host` or set `GALAXY_URL`.
+
+Troubleshooting: if a command hangs before printing anything on a Linux box with a broken
+Secret Service, set `GXY_NO_KEYRING=1` (the native keyring constructor blocks and cannot be timed
+out yet; moving it to a killable worker thread is a follow-up).
+
 ### Keeping tokens away from agents
 
 `gxy auth env` puts the token in the environment of every process started from that shell,

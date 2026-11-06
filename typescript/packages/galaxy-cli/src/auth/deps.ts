@@ -8,7 +8,7 @@ import { withUserAgent } from "./user-agent";
 import { createWhoami } from "./whoami";
 
 /** The real wiring of `auth`, built once per invocation (so `--help` never touches any of it). */
-export function createAuthDeps(commandName: string): AuthDeps {
+export function createAuthDeps(commandName: string, globals: () => { url?: string; profile?: string } = () => ({})): AuthDeps {
   const env = process.env;
   const store = createCredentialStore(env);
   const fetchWithUa = withUserAgent();
@@ -17,7 +17,22 @@ export function createAuthDeps(commandName: string): AuthDeps {
     discover: (baseUrl, signal) =>
       discover(baseUrl, { clientId: env.GXY_OAUTH_CLIENT_ID || undefined, fetch: fetchWithUa, signal }),
     whoami: createWhoami(),
-    resolveHost: (explicit) => resolveHost({ explicit, env, dotenv: loadSources().dotenv, store, commandName }),
+    // The same rule operations use (config.ts), so the two cannot pick different Galaxies. The
+    // global `--url` counts as the flag and `--profile` supplies its planemo URL; login ignores
+    // `.env` and the profile (see pickHost).
+    resolveHost: (explicit, purpose) => {
+      const g = globals();
+      const src = loadSources();
+      return resolveHost({
+        explicit: explicit ?? g.url,
+        env,
+        dotenv: src.dotenv,
+        profileUrl: g.profile ? src.profiles[g.profile]?.galaxy_url : undefined,
+        forLogin: purpose === "login",
+        store,
+        commandName,
+      });
+    },
     openBrowser: (url) => openBrowser(url, env),
     canOpenBrowser: () => canOpenBrowser(env),
     now: () => new Date(),
