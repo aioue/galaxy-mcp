@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdir, open, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { BaseUrl, LoginMethod, LoginSummary, StorageKind } from "./types";
@@ -15,6 +16,12 @@ export interface HostRecord extends LoginSummary {
  * with a warning, when an existing one is looser). Writes go to a temp file in the same
  * directory, are fsynced, then renamed over the target, so a crash never leaves a half file.
  *
+ * Before every read or write the directory and `hosts.yml` are `lstat`ed and refused if they
+ * are symlinks or belong to another user: the file holds a bearer token, and a link planted
+ * by someone else in a shared or misconfigured home could redirect it, or make us trust
+ * content they wrote. The temp file is created exclusively (`wx`) with mode 0600 and then
+ * `fchmod`ed, because the umask can mask the creation mode but not the chmod.
+ *
  * Read-modify-write is not locked across processes: two simultaneous logins can lose one
  * update. Logins are rare and interactive, so that is accepted.
  */
@@ -23,6 +30,8 @@ export class FileStore {
     readonly dir: string,
     readonly path: string = join(dir, "hosts.yml"),
     private readonly warn: (message: string) => void = () => {},
+    /** Who must own the directory and file; undefined (Windows) skips the check. Injectable for tests. */
+    private readonly uid: number | undefined = process.getuid?.(),
   ) {}
 
   async get(baseUrl: BaseUrl): Promise<HostRecord | null> {
@@ -49,9 +58,16 @@ export class FileStore {
   }
 
   private async readAll(): Promise<Record<BaseUrl, HostRecord>> {
+    await this.assertSafe();
     let text: string;
     try {
-      text = await readFile(this.path, "utf8");
+      // O_NOFOLLOW closes the gap between the lstat above and this open.
+      const fh = await open(this.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        text = await fh.readFile("utf8");
+      } finally {
+        await fh.close();
+      }
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
       throw e;
@@ -135,7 +151,9 @@ export class FileStore {
   }
 
   private async writeAll(all: Record<BaseUrl, HostRecord>): Promise<void> {
+    await this.assertSafe();
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    await this.assertSafe();
     const dirMode = (await stat(this.dir)).mode & 0o777;
     if (dirMode & 0o077) {
       await chmod(this.dir, 0o700);
@@ -159,6 +177,43 @@ export class FileStore {
     } catch (e) {
       await unlink(tmp).catch(() => {});
       throw e;
+    }
+    // Make the rename itself durable. Best effort: not every platform can open a directory.
+    try {
+      const dh = await open(this.dir, "r");
+      try {
+        await dh.sync();
+      } finally {
+        await dh.close();
+      }
+    } catch {
+      // Ignored on purpose.
+    }
+  }
+
+  /** Refuse a config directory or `hosts.yml` that is a symlink, the wrong kind, or someone else's. */
+  private async assertSafe(): Promise<void> {
+    for (const [what, p, kind] of [
+      ["directory", this.dir, "dir"],
+      ["file", this.path, "file"],
+    ] as const) {
+      let st;
+      try {
+        st = await lstat(p);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw e;
+      }
+      const problem = st.isSymbolicLink()
+        ? "is a symbolic link"
+        : (kind === "dir" ? !st.isDirectory() : !st.isFile())
+          ? `is not a regular ${what}`
+          : this.uid !== undefined && st.uid !== this.uid
+            ? "belongs to another user"
+            : undefined;
+      if (problem) {
+        throw new Error(`Refusing to use ${p}: it ${problem}. It would hold your login tokens, so it must be a plain ${what} you own. Remove it or point GXY_CONFIG_DIR somewhere else.`);
+      }
     }
   }
 
