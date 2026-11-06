@@ -36,9 +36,11 @@ export function fakeLogin(over: Partial<StoredLogin> = {}): StoredLogin {
 
 export class FakeStore implements CredentialStore {
   logins = new Map<string, StoredLogin & { storage: StorageKind }>();
-  putCalls: { login: StoredLogin; opts?: { insecureStorage?: boolean } }[] = [];
+  putCalls: { login: StoredLogin; opts?: { insecureStorage?: boolean; requireKeyring?: boolean } }[] = [];
   nextStorage: StorageKind = "keyring";
   nextWarning: string | undefined;
+  /** False makes a `requireKeyring` put refuse, as the real store does with no keyring. */
+  keyringAvailable = true;
   order: string[] = [];
 
   seed(login: StoredLogin, storage: StorageKind = "keyring"): this {
@@ -48,8 +50,11 @@ export class FakeStore implements CredentialStore {
   async get(baseUrl: BaseUrl) {
     return this.logins.get(baseUrl) ?? null;
   }
-  async put(login: StoredLogin, opts?: { insecureStorage?: boolean }): Promise<PutResult> {
+  async put(login: StoredLogin, opts?: { insecureStorage?: boolean; requireKeyring?: boolean }): Promise<PutResult> {
     this.putCalls.push({ login, opts });
+    if (opts?.requireKeyring && !opts.insecureStorage && !this.keyringAvailable) {
+      throw new AuthError("denied", "No system keyring here, so nothing was stored. Rerun with --insecure-storage to keep it in /fake/hosts.yml (readable only by you), or use GALAXY_API_KEY for this session.");
+    }
     this.order.push("put");
     const storage: StorageKind = opts?.insecureStorage ? "file" : this.nextStorage;
     this.logins.set(login.baseUrl, { ...login, storage });

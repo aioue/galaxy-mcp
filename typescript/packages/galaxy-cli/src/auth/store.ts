@@ -30,7 +30,7 @@ export class CombinedStore implements CredentialStore {
     return { ...summary, token };
   }
 
-  async put(login: StoredLogin, opts: { insecureStorage?: boolean } = {}): Promise<PutResult> {
+  async put(login: StoredLogin, opts: { insecureStorage?: boolean; requireKeyring?: boolean } = {}): Promise<PutResult> {
     const { token, ...summary } = login;
     const prior = await this.file.get(login.baseUrl);
     let storage: StorageKind = "file";
@@ -43,7 +43,16 @@ export class CombinedStore implements CredentialStore {
           throw new Error("the token did not read back");
         }
         storage = "keyring";
-      } catch {
+      } catch (e) {
+        if (opts.requireKeyring) {
+          // Nothing has been written yet (the file is only touched below), so refusing is clean.
+          await this.keyring.delete(login.baseUrl, login.username).catch(() => {});
+          throw new AuthError(
+            "denied",
+            `No system keyring here, so nothing was stored. Rerun with --insecure-storage to keep it in ${this.file.path} (readable only by you), or use GALAXY_API_KEY for this session.`,
+            { cause: e },
+          );
+        }
         warning = `No system keyring available; token saved in plain text at ${this.file.path} (readable only by you)`;
       }
     }
@@ -60,8 +69,23 @@ export class CombinedStore implements CredentialStore {
   async delete(baseUrl: BaseUrl): Promise<boolean> {
     const rec = await this.file.get(baseUrl);
     if (!rec) return false;
-    if (rec.storage === "keyring") await this.keyring.delete(baseUrl, rec.username).catch(() => {});
+    let leftover: unknown;
+    if (rec.storage === "keyring") {
+      try {
+        await this.keyring.delete(baseUrl, rec.username);
+      } catch (e) {
+        leftover = e;
+      }
+    }
+    // The local record goes either way: a login that cannot be found cannot be used by mistake.
     await this.file.delete(baseUrl);
+    if (leftover) {
+      throw new AuthError(
+        "unsupported",
+        `The login record was removed, but the system keyring could not confirm that the secret for ${baseUrl} is gone, so it may remain there: ${(leftover as Error).message}`,
+        { cause: leftover },
+      );
+    }
     return true;
   }
 

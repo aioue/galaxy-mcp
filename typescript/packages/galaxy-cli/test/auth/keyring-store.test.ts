@@ -24,3 +24,16 @@ describe("KeyringStore", () => {
     await expect(new KeyringStore(kr, 50).set(baseUrl, "a", "x")).rejects.toThrow(/system keyring failed/);
   });
 });
+
+describe("KeyringStore.delete is verified", () => {
+  it("reads back after deleting and reports the secret may remain when it is still there", async () => {
+    const kr = new FakeKeyring();
+    const s = new KeyringStore(kr, 50);
+    await s.set(baseUrl, "alice", "FAKE");
+    kr.mode = "undeletable";
+    await expect(s.delete(baseUrl, "alice")).rejects.toThrow(/may remain/);
+  });
+  it("reports false when there was nothing to delete, and does not throw", async () => {
+    expect(await new KeyringStore(new FakeKeyring(), 50).delete(baseUrl, "alice")).toBe(false);
+  });
+});

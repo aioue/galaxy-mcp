@@ -51,8 +51,12 @@ export interface PutResult {
 export interface CredentialStore {
   /** The login for this Galaxy, or null if there is none. Never throws for "not found". */
   get(baseUrl: BaseUrl): Promise<(StoredLogin & { storage: StorageKind }) | null>;
-  /** Store or replace the login for `login.baseUrl`. `insecureStorage` skips the keyring. */
-  put(login: StoredLogin, opts?: { insecureStorage?: boolean }): Promise<PutResult>;
+  /**
+   * Store or replace the login for `login.baseUrl`. `insecureStorage` skips the keyring.
+   * `requireKeyring` forbids the plaintext fallback: with no working keyring, nothing is
+   * stored and the call rejects with an `AuthError` (used for admin tokens).
+   */
+  put(login: StoredLogin, opts?: { insecureStorage?: boolean; requireKeyring?: boolean }): Promise<PutResult>;
   /** Remove the login for this Galaxy from every place it is kept. Returns false if there was none. */
   delete(baseUrl: BaseUrl): Promise<boolean>;
   /** Every stored login, without tokens, sorted by base URL. */

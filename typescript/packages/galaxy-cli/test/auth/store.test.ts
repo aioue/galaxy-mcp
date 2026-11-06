@@ -65,11 +65,33 @@ describe("CombinedStore", () => {
     expect(await store.delete(baseUrl)).toBe(false);
   });
 
-  it("delete still removes the metadata when the keyring is down", async () => {
+  it("delete still removes the metadata when the keyring is down, and says the secret may remain", async () => {
     await store.put(fakeLogin());
     kr.mode = "throw";
-    expect(await store.delete(baseUrl)).toBe(true);
+    await expect(store.delete(baseUrl)).rejects.toThrow(/may remain/);
     expect(await file.list()).toEqual([]);
+  });
+
+  it("delete does not trust a keyring that says it deleted but still holds the secret", async () => {
+    await store.put(fakeLogin());
+    kr.mode = "undeletable";
+    await expect(store.delete(baseUrl)).rejects.toThrow(/may remain/);
+    expect(await file.list()).toEqual([]);
+  });
+
+  it("with requireKeyring and no keyring, stores nothing and says how to opt in", async () => {
+    kr.mode = "throw";
+    await expect(store.put(fakeLogin(), { requireKeyring: true })).rejects.toThrow(/--insecure-storage.*hosts\.yml.*GALAXY_API_KEY/s);
+    expect(await file.list()).toEqual([]);
+    // Without the requirement the file fallback still works, with its warning.
+    const put = await store.put(fakeLogin());
+    expect(put.storage).toBe("file");
+    expect(put.warning).toBeDefined();
+  });
+
+  it("with requireKeyring and --insecure-storage, the file is used by choice", async () => {
+    kr.mode = "throw";
+    expect((await store.put(fakeLogin(), { requireKeyring: true, insecureStorage: true })).storage).toBe("file");
   });
 
   it("get explains an unreachable keyring instead of returning a login without a token", async () => {
