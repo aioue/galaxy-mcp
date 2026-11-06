@@ -19,10 +19,11 @@ describe("auth status", () => {
     expect(h.whoamiCalls).toHaveLength(1);
   });
 
-  it("shows the token with --show-token", async () => {
+  it("puts the unmasked token on stdout, never stderr, with --show-token", async () => {
     const h = harness({ stored: [fakeLogin()] });
     await statusCommand({ showToken: true }, h.deps);
-    expect(h.cap.err).toContain(FAKE_TOKEN);
+    expect(h.cap.out).toBe(`${HOST}\t${FAKE_TOKEN}\n`);
+    expect(h.cap.err).not.toContain(FAKE_TOKEN);
   });
 
   it("says 'no expiry' for a pasted key", async () => {

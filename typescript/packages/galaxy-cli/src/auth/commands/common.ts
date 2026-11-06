@@ -1,13 +1,20 @@
 import { exitCodeForAuthError, EX_SOFTWARE } from "../../exit";
+import { sanitize } from "../sanitize";
 import { AuthError, type AuthDeps, type BaseUrl, type StoredLogin, type StorageKind } from "../types";
 
-/** Print a failure for a person and map it to an exit code. Never includes a token: messages are ours. */
+export { sanitize };
+
+/**
+ * Print a failure for a person and map it to an exit code. Never includes a token: messages
+ * are ours. They can still quote the server (an OAuth error text, a whoami failure), so
+ * terminal control characters are stripped on the way out.
+ */
 export function fail(deps: AuthDeps, e: unknown): number {
   if (e instanceof AuthError) {
-    deps.io.stderr.write(`${e.message}\n`);
+    deps.io.stderr.write(`${sanitize(e.message, { keepNewlines: true })}\n`);
     return exitCodeForAuthError(e.kind);
   }
-  deps.io.stderr.write(`Unexpected error: ${e instanceof Error ? e.message : String(e)}\n`);
+  deps.io.stderr.write(`Unexpected error: ${sanitize(e instanceof Error ? e.message : String(e), { keepNewlines: true })}\n`);
   return EX_SOFTWARE;
 }
 
@@ -60,7 +67,11 @@ export function describeStorage(kind: StorageKind): string {
  * how to log in. No network: `token`, `env` and `headers` are called by helpers.
  */
 export async function requireLogin(deps: AuthDeps, explicitHost?: string): Promise<StoredLogin> {
-  const baseUrl: BaseUrl = await deps.resolveHost(explicitHost);
+  return requireLoginAt(deps, await deps.resolveHost(explicitHost));
+}
+
+/** `requireLogin` for a Galaxy the caller has already settled on. */
+export async function requireLoginAt(deps: AuthDeps, baseUrl: BaseUrl): Promise<StoredLogin> {
   const login = await deps.store.get(baseUrl);
   const hint = `${deps.commandName} auth login --host ${baseUrl}`;
   if (!login) throw new AuthError("not_logged_in", `Not logged in to ${baseUrl}. Run: ${hint}`);
