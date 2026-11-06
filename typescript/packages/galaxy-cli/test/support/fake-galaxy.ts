@@ -1,31 +1,41 @@
 /**
  * A fake Galaxy for testing `gxy auth`: an RFC 8414 authorization server (device flow,
- * token, revocation) plus `GET /api/users/current`, on a `node:http` server bound to
- * 127.0.0.1 with an OS-assigned port. It speaks the contract proposed to Galaxy upstream:
+ * token, revocation) plus `GET /api/version` and `GET /api/users/current`, on a `node:http`
+ * server bound to 127.0.0.1 with an OS-assigned port.
+ *
+ * What is real and what is a guess. Confirmed against a real Galaxy 26.1: an unknown key at
+ * `/api/users/current` gets 200 with an anonymous record that has no `username`;
+ * `/.well-known/oauth-authorization-server` is a 404 with an HTML body; `/api/version` is
+ * JSON with `version_major`. Everything else is an assumption about what Galaxy will do, not
+ * an observation: the whole device-flow contract (metadata, `/oauth/device_authorization`,
+ * `/oauth/token`, `/oauth/revoke`; the contract proposed to Galaxy upstream), the exact
+ * fields of the anonymous record and of a user record, the 403 shape of
+ * `setInvalidKeyResponse("forbidden")`, and the redirect and error faults. Tests should
+ * assert the behaviour of our code against these, not the literals.
  *
  * - metadata at `/.well-known/oauth-authorization-server<prefix>` (RFC 8414 path
- *   insertion, so a Galaxy under `/galaxy` is found at `.../oauth-authorization-server/galaxy`);
- *   the issuer is the base URL
+ *   insertion); the issuer is the base URL
  * - public client `galaxy-cli` (no secret; `token_endpoint_auth_methods_supported: ["none"]`)
  * - RFC 8628 device authorization, without `verification_uri_complete`
  * - a token endpoint answering `authorization_pending`, `slow_down`, `access_denied`,
  *   `expired_token`, or the token
  * - RFC 7009 revocation
  * - `/api/users/current`, which knows a user only by a token this server issued and has not
- *   revoked or expired; any other key gets what Galaxy gives a session without a valid key
+ *   revoked or expired
  *
- * Everything a test needs to steer is a method on the returned object (approve, deny,
- * expire, slowDown, ...), and every request is recorded in `requests`. Tokens are obviously
- * fake (`fake-access-token-N`).
+ * Everything a test needs to steer is a method on the returned object, and every request is
+ * recorded in `requests`. Tokens are obviously fake (`fake-access-token-N`).
  *
  *   const galaxy = await startFakeGalaxy();
- *   const code = galaxy.pendingCodes()[0];   // after startDeviceLogin
+ *   const token = galaxy.issueToken({ admin: true });   // no device flow needed
+ *   // or, for the flow itself:
+ *   const code = galaxy.pendingCodes()[0];               // after startDeviceLogin
  *   galaxy.approve(code, { scopes: ["read"], expiresIn: 3600 });
- *   ...
  *   await galaxy.close();
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { afterEach } from "vitest";
 
 export interface FakeGalaxyOptions {
   /** Serve Galaxy under this path prefix, e.g. `/galaxy`. Default none. */
@@ -34,8 +44,6 @@ export interface FakeGalaxyOptions {
   interval?: number;
   /** Seconds a user code lives. Default 600. */
   deviceExpiresIn?: number;
-  /** Start with the device flow off (metadata has no `device_authorization_endpoint`). */
-  deviceFlow?: boolean;
   /** Start with no `revocation_endpoint` in the metadata. */
   revocationEndpoint?: boolean;
 }
@@ -49,6 +57,8 @@ export interface Approval {
   email?: string;
   /** Make `/api/users/current` report `is_admin: true` for this token. */
   admin?: boolean;
+  /** Issue this literal string as the access token (to send a client a token it must refuse). */
+  accessToken?: string;
 }
 
 export interface RecordedRequest {
@@ -61,8 +71,6 @@ export interface RecordedRequest {
   body: string;
   /** The body parsed as `application/x-www-form-urlencoded` (empty when there is none). */
   form: Record<string, string>;
-  /** `performance.now()` at arrival, for asserting poll intervals. */
-  at: number;
 }
 
 /** How `/.well-known/oauth-authorization-server...` answers. */
@@ -78,8 +86,6 @@ export interface FakeGalaxy {
   requestsTo(suffix: string): RecordedRequest[];
   /** User codes issued and not yet approved, denied or expired, oldest first. */
   pendingCodes(): string[];
-  /** The most recent user code issued. */
-  lastUserCode(): string;
   approve(userCode: string, approval?: Approval): void;
   deny(userCode: string): void;
   /** The code stops working: the token endpoint answers `expired_token`. */
@@ -89,9 +95,9 @@ export interface FakeGalaxy {
   setDeviceFlow(on: boolean): void;
   setRevocationEndpoint(on: boolean): void;
   setMetadataMode(mode: MetadataMode): void;
-  /** What `/api/users/current` says for an unknown key: 200 with the anonymous shape (default), or 403. */
   /** What `/api/version` answers: the version (default), a 302 to another origin, or an HTML page. */
   setVersionMode(mode: VersionMode): void;
+  /** What `/api/users/current` says for an unknown key: 200 with the anonymous shape (default, observed), or 403 (a guess). */
   setInvalidKeyResponse(kind: "anonymous" | "forbidden"): void;
   /** Make the device authorization endpoint answer this response instead (e.g. malformed JSON). */
   setDeviceAuthorizationOverride(r: { status: number; body: string; contentType?: string } | null): void;
@@ -110,18 +116,14 @@ export interface FakeGalaxy {
   failTokenPolls(n: number, fault: { reset: true } | { status: number; headers?: Record<string, string>; body?: string }): void;
   /** Merge these fields over the discovery metadata (e.g. an endpoint on another origin). */
   setMetadataOverrides(fields: Record<string, unknown> | null): void;
-  /** Make the device authorization response carry this `verification_uri`. */
-  setVerificationUri(uri: string | null): void;
   /** Make `/api/users/current` answer this status with an empty JSON body; `null` restores it. */
   setUsersCurrentStatus(status: number | null): void;
-  /** Revoke from the server side, as an admin or expiry would. */
-  revokeToken(token: string): void;
+  /** Issue a token as a finished device login would, without running the flow. */
+  issueToken(options?: Approval): string;
   /** Tokens issued so far, in order. */
   issuedTokens(): string[];
   /** Whether this token would be accepted by `/api/users/current` right now. */
   isTokenValid(token: string): boolean;
-  /** The metadata URL a client should fetch, for assertions. */
-  readonly metadataUrl: string;
   close(): Promise<void>;
 }
 
@@ -149,7 +151,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
   const prefix = (options.pathPrefix ?? "").replace(/\/+$/, "");
   const interval = options.interval ?? 0.01;
   const deviceExpiresIn = options.deviceExpiresIn ?? 600;
-  let deviceFlow = options.deviceFlow ?? true;
+  let deviceFlow = true;
   let revocation = options.revocationEndpoint ?? true;
   let metadataMode: MetadataMode = "ok";
   let versionMode: VersionMode = "ok";
@@ -177,7 +179,6 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
   let tokenFaults = 0;
   let tokenFault: Parameters<FakeGalaxy["failTokenPolls"]>[1] = { reset: true };
   let metadataOverrides: Record<string, unknown> = {};
-  let verificationUri: string | null = null;
   let usersCurrentStatus: number | null = null;
 
   const metadata = () => ({
@@ -191,6 +192,20 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     ...metadataOverrides,
   });
 
+  const mint = (a: Approval): string => {
+    const expiresIn = a.expiresIn === undefined ? 3600 : a.expiresIn;
+    const token = a.accessToken ?? `fake-access-token-${tokens.size + 1}`;
+    tokens.set(token, {
+      token,
+      username: a.username ?? "fake-user",
+      email: a.email ?? "fake-user@example.org",
+      admin: a.admin ?? false,
+      expiresAtMs: expiresIn === null ? null : Date.now() + expiresIn * 1000,
+      revoked: false,
+    });
+    return token;
+  };
+
   const tokenIsValid = (t: TokenEntry | undefined): t is TokenEntry =>
     !!t && !t.revoked && (t.expiresAtMs === null || t.expiresAtMs > Date.now());
 
@@ -202,7 +217,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     if ((req.headers["content-type"] ?? "").includes("application/x-www-form-urlencoded")) {
       for (const [k, v] of new URLSearchParams(body)) form[k] = v;
     }
-    requests.push({ method: req.method ?? "GET", url: req.url ?? "", headers: { ...req.headers }, body, form, at: performance.now() });
+    requests.push({ method: req.method ?? "GET", url: req.url ?? "", headers: { ...req.headers }, body, form });
 
     const path = new URL(req.url ?? "/", "http://x").pathname;
     const method = req.method ?? "GET";
@@ -217,7 +232,9 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     if (method === "GET" && path === `/.well-known/oauth-authorization-server${prefix}`) {
       switch (metadataMode) {
         case "not-found":
-          return json(res, 404, { err_msg: "Not found" });
+          // As a real Galaxy 26.1 answers: an HTML 404 page, not JSON.
+          res.writeHead(404, { "content-type": "text/html" });
+          return void res.end("<html><body>404 Not Found</body></html>");
         case "not-json":
           res.writeHead(200, { "content-type": "text/html" });
           return void res.end("<html>Galaxy</html>");
@@ -247,7 +264,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
       return json(res, 200, {
         device_code: entry.deviceCode,
         user_code: entry.userCode,
-        verification_uri: verificationUri ?? `${baseUrl}/oauth/device`,
+        verification_uri: `${baseUrl}/oauth/device`,
         expires_in: deviceExpiresIn,
         interval,
       });
@@ -278,15 +295,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
       entry.consumed = true;
       const a = entry.approval ?? {};
       const expiresIn = a.expiresIn === undefined ? 3600 : a.expiresIn;
-      const token = `fake-access-token-${tokens.size + 1}`;
-      tokens.set(token, {
-        token,
-        username: a.username ?? "fake-user",
-        email: a.email ?? "fake-user@example.org",
-        admin: a.admin ?? false,
-        expiresAtMs: expiresIn === null ? null : Date.now() + expiresIn * 1000,
-        revoked: false,
-      });
+      const token = mint(a);
       return json(res, 200, {
         access_token: token,
         token_type: "Bearer",
@@ -310,7 +319,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
         res.writeHead(200, { "content-type": "text/html" });
         return void res.end("<html>Please log in</html>");
       }
-      return json(res, 200, { version_major: "24.2", version_minor: "0" });
+      return json(res, 200, { version_major: "26.1", version_minor: "0" });
     }
 
     if (method === "GET" && local === "/api/users/current") {
@@ -345,7 +354,6 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     requests,
     requestsTo: (suffix) => requests.filter((r) => new URL(r.url, "http://x").pathname.endsWith(suffix)),
     pendingCodes: () => [...devices.values()].filter((d) => d.state === "pending").map((d) => d.userCode),
-    lastUserCode: () => [...devices.keys()].at(-1) ?? "",
     approve(userCode, approval = {}) {
       const e = entryFor(userCode);
       e.state = "approved";
@@ -366,25 +374,34 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
       tokenFault = fault;
     },
     setMetadataOverrides: (f) => void (metadataOverrides = f ?? {}),
-    setVerificationUri: (u) => void (verificationUri = u),
     setUsersCurrentStatus: (c) => void (usersCurrentStatus = c),
     setRedirect(suffix, location, status = 302) {
       if (location === null) redirects.delete(suffix);
       else redirects.set(suffix, { location, status });
     },
-    revokeToken(token) {
-      const t = tokens.get(token);
-      if (t) t.revoked = true;
-    },
+    issueToken: (approval = {}) => mint(approval),
     issuedTokens: () => [...tokens.keys()],
     isTokenValid: (token) => tokenIsValid(tokens.get(token)),
-    get metadataUrl() {
-      return `${new URL(baseUrl).origin}/.well-known/oauth-authorization-server${prefix}`;
-    },
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.closeAllConnections();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
+  };
+}
+
+/**
+ * For a test file that needs fake Galaxies: call once at the top level. The returned function
+ * starts one (as many as the test wants), and every one is closed after each test.
+ */
+export function useFakeGalaxies(): (options?: FakeGalaxyOptions) => Promise<FakeGalaxy> {
+  const open: FakeGalaxy[] = [];
+  afterEach(async () => {
+    await Promise.all(open.splice(0).map((g) => g.close()));
+  });
+  return async (options) => {
+    const g = await startFakeGalaxy(options);
+    open.push(g);
+    return g;
   };
 }

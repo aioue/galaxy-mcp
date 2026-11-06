@@ -1,5 +1,6 @@
 import { PassThrough } from "node:stream";
 import { normalizeBaseUrl } from "../../src/auth/base-url";
+import { resolveHost } from "../../src/auth/host";
 import {
   AuthError,
   type AuthDeps,
@@ -34,14 +35,21 @@ export function fakeLogin(over: Partial<StoredLogin> = {}): StoredLogin {
   };
 }
 
+/** What `FakeStore` says when it refuses an admin token for lack of a keyring (the real wording is store.ts's). */
+export const REFUSED_WITHOUT_KEYRING = "keyring unavailable, nothing stored";
+
 export class FakeStore implements CredentialStore {
   logins = new Map<string, StoredLogin & { storage: StorageKind }>();
   putCalls: { login: StoredLogin; opts?: { insecureStorage?: boolean; requireKeyring?: boolean } }[] = [];
   nextStorage: StorageKind = "keyring";
   nextWarning: string | undefined;
-  /** False makes a `requireKeyring` put refuse, as the real store does with no keyring. */
+  /**
+   * False makes a `requireKeyring` put refuse, as the real store does with no keyring. The
+   * wording of that refusal belongs to store.ts and is tested there, not here.
+   */
   keyringAvailable = true;
-  order: string[] = [];
+  /** Set to make `put` throw this instead (a failed write). */
+  putError: Error | undefined;
 
   seed(login: StoredLogin, storage: StorageKind = "keyring"): this {
     this.logins.set(login.baseUrl, { ...login, storage });
@@ -52,16 +60,15 @@ export class FakeStore implements CredentialStore {
   }
   async put(login: StoredLogin, opts?: { insecureStorage?: boolean; requireKeyring?: boolean }): Promise<PutResult> {
     this.putCalls.push({ login, opts });
+    if (this.putError) throw this.putError;
     if (opts?.requireKeyring && !opts.insecureStorage && !this.keyringAvailable) {
-      throw new AuthError("denied", "No system keyring here, so nothing was stored. Rerun with --insecure-storage to keep it in /fake/hosts.yml (readable only by you), or use GALAXY_API_KEY for this session.");
+      throw new AuthError("denied", REFUSED_WITHOUT_KEYRING);
     }
-    this.order.push("put");
     const storage: StorageKind = opts?.insecureStorage ? "file" : this.nextStorage;
     this.logins.set(login.baseUrl, { ...login, storage });
     return { storage, ...(this.nextWarning ? { warning: this.nextWarning } : {}) };
   }
   async delete(baseUrl: BaseUrl) {
-    this.order.push("delete");
     return this.logins.delete(baseUrl);
   }
   async list(): Promise<LoginSummary[]> {
@@ -122,25 +129,16 @@ export class Capture {
   stderr = { write: (s: string) => void (this.err += s) };
 }
 
-export class Clock {
-  constructor(public t = new Date(DAY)) {}
-  now = () => new Date(this.t);
-  advance(ms: number) {
-    this.t = new Date(this.t.getTime() + ms);
-  }
-}
-
 export interface Harness {
   deps: AuthDeps;
   store: FakeStore;
   server: FakeServer;
   cap: Capture;
-  clock: Clock;
   stdin: PassThrough;
   opened: string[];
   whoamiCalls: { baseUrl: string; token: string }[];
   /** Mutable knobs. */
-  knobs: { whoami: WhoAmI | AuthError; browserOpens: boolean; browserAvailable: boolean; discoverError?: AuthError };
+  knobs: { whoami: WhoAmI | AuthError; browserAvailable: boolean; discoverError?: AuthError };
 }
 
 /** A set of in-memory fakes behind `AuthDeps`. `stdinText` is written and ended at once. */
@@ -149,17 +147,17 @@ export function harness(
 ): Harness {
   const store = new FakeStore();
   for (const l of opts.stored ?? []) store.seed(l);
-  const clock = new Clock();
+  const now = () => new Date(DAY);
   const cap = new Capture();
   const stdin = new PassThrough();
   if (opts.stdinText !== undefined) {
     stdin.end(opts.stdinText);
   }
-  const server = new FakeServer(HOST, clock.now());
+  const server = new FakeServer(HOST, now());
   const opened: string[] = [];
   const whoamiCalls: { baseUrl: string; token: string }[] = [];
-  const knobs: Harness["knobs"] = { whoami: { username: "aioue", email: "a@example.org" }, browserOpens: true, browserAvailable: true };
-  const env = opts.env ?? {};
+  const knobs: Harness["knobs"] = { whoami: { username: "aioue", email: "a@example.org" }, browserAvailable: true };
+  const env = { ...(opts.hostFromEnv ? { GALAXY_URL: opts.hostFromEnv } : {}), ...opts.env };
   const deps: AuthDeps = {
     store,
     async discover() {
@@ -171,24 +169,28 @@ export function harness(
       if (knobs.whoami instanceof AuthError) throw knobs.whoami;
       return knobs.whoami;
     },
-    async resolveHost(explicit) {
-      if (explicit) return normalizeBaseUrl(explicit);
-      if (opts.hostFromEnv) return normalizeBaseUrl(opts.hostFromEnv);
-      const all = await store.list();
-      if (all.length === 1) return all[0]!.baseUrl;
-      if (all.length > 1) throw new AuthError("ambiguous_host", `Several logins: ${all.map((l) => l.baseUrl).join(", ")}. Pass --host.`);
-      throw new AuthError("usage", "No Galaxy named. Pass --host <url>.");
-    },
+    // The real rule, over the fake store; `.env` and profiles are not in play here.
+    resolveHost: (explicit, purpose) => resolveHost({ explicit, env, dotenv: {}, store, forLogin: purpose === "login", commandName: "gxy" }),
     ignoredLoginHost: () => opts.ignoredLoginHost,
     async openBrowser(url) {
       opened.push(url);
-      return knobs.browserOpens;
+      return true;
     },
     canOpenBrowser: () => knobs.browserAvailable,
-    now: clock.now,
+    now,
     env,
     io: { stdin, stdout: cap.stdout, stderr: cap.stderr, interactive: opts.interactive ?? false },
     commandName: "gxy",
   };
-  return { deps, store, server, cap, clock, stdin, opened, whoamiCalls, knobs };
+  return { deps, store, server, cap, stdin, opened, whoamiCalls, knobs };
+}
+
+/** The `AuthError` a promise rejects with (the test fails if it resolves or rejects with anything else). */
+export async function authErrorOf(p: Promise<unknown>): Promise<AuthError> {
+  const e = await p.then(
+    () => undefined,
+    (x: unknown) => x,
+  );
+  if (!(e instanceof AuthError)) throw new Error(`expected an AuthError, got ${e === undefined ? "a resolved promise" : String(e)}`);
+  return e;
 }

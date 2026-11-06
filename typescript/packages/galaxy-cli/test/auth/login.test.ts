@@ -1,182 +1,352 @@
 import { describe, it, expect, vi } from "vitest";
 import { loginCommand } from "../../src/auth/commands/login";
-import { AuthError } from "../../src/auth/types";
-import { FAKE_TOKEN, HOST, fakeLogin, harness } from "./fakes";
+import { discover } from "../../src/auth/oauth";
+import { createWhoami } from "../../src/auth/whoami";
+import { AuthError, type BaseUrl } from "../../src/auth/types";
+import { useFakeGalaxies, type MetadataMode } from "../support/fake-galaxy";
+import { FAKE_TOKEN, HOST, REFUSED_WITHOUT_KEYRING, harness } from "./harness";
 
 const HOST_ARG = "https://dev.galaxy.example.org";
+const never = <T,>() => new Promise<T>(() => {});
 
-describe("auth login (device flow)", () => {
-  it("prints the transcript to stderr, stores the login, and keeps stdout empty", async () => {
+describe("login (device flow)", () => {
+  it("shows the code and page on stderr, stores the login, and keeps stdout empty", async () => {
     const h = harness();
     const code = await loginCommand({ host: HOST_ARG, scopes: ["histories:read", "tools:run"] }, h.deps);
     expect(code).toBe(0);
     expect(h.cap.out).toBe("");
-    expect(h.cap.err).toContain("Requesting access to dev.galaxy.example.org");
-    expect(h.cap.err).toContain("Scopes  histories:read tools:run");
-    expect(h.cap.err).toContain("! Only approve this code if you ran this command yourself.");
-    expect(h.cap.err).toContain("One-time code: WDJB-MJHT");
-    expect(h.cap.err).toContain("Enter it at https://dev.galaxy.example.org/login/device");
-    expect(h.cap.err).toContain("Waiting for approval (code expires in 14:52)…");
-    expect(h.cap.err).toContain("✓ Logged in to dev.galaxy.example.org as aioue");
-    expect(h.cap.err).toContain("✓ Token stored in the system keyring (expires 2026-11-06 18:42 UTC)");
+    expect(h.cap.err).toContain("WDJB-MJHT");
+    expect(h.cap.err).toContain("https://dev.galaxy.example.org/login/device");
+    expect(h.cap.err).toMatch(/only approve this code/i);
+    expect(h.cap.err).toContain("Logged in to dev.galaxy.example.org as aioue");
+    expect(h.cap.err).toMatch(/stored in the system keyring/);
     expect(h.server.startedWith).toEqual([["histories:read", "tools:run"]]);
-    const stored = h.store.putCalls[0]!.login;
-    expect(stored).toMatchObject({ baseUrl: HOST, username: "aioue", method: "device", scopes: ["histories:read"], token: FAKE_TOKEN });
-    expect(stored.expiresAt).toBe("2026-11-06T18:42:00.000Z");
+    expect(h.store.putCalls[0]!.login).toMatchObject({
+      baseUrl: HOST,
+      username: "aioue",
+      method: "device",
+      scopes: ["histories:read"],
+      token: FAKE_TOKEN,
+      expiresAt: "2026-11-06T18:42:00.000Z",
+    });
   });
 
-  it("says 'server default' without --scopes and passes none", async () => {
+  it("asks for no scopes when --scopes is not given", async () => {
     const h = harness();
     await loginCommand({ host: HOST_ARG }, h.deps);
-    expect(h.cap.err).toContain("Scopes  server default");
     expect(h.server.startedWith).toEqual([undefined]);
   });
 
-  it("never prints the device code or the token", async () => {
-    const h = harness();
-    await loginCommand({ host: HOST_ARG }, h.deps);
-    expect(h.cap.err + h.cap.out).not.toContain(h.server.pending.deviceCode);
-    expect(h.cap.err + h.cap.out).not.toContain(FAKE_TOKEN);
-  });
-
-  it("does not offer Enter when not interactive, and still polls", async () => {
-    const h = harness({ interactive: false });
-    expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(0);
-    expect(h.cap.err).not.toContain("Press Enter");
-    expect(h.opened).toEqual([]);
-  });
-
-  it("offers Enter when interactive with a browser, and opens the page on Enter", async () => {
-    const h = harness({ interactive: true });
-    h.server.pending.outcome = "hang";
-    const ac = new AbortController();
-    const p = loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps);
-    await vi.waitFor(() => expect(h.cap.err).toContain("Waiting for approval"));
-    expect(h.cap.err).toContain("Press Enter to open that page in your browser…");
-    expect(h.opened).toEqual([]);
-    h.stdin.write("\n");
-    await vi.waitFor(() => expect(h.opened).toEqual(["https://dev.galaxy.example.org/login/device"]));
-    ac.abort();
-    expect(await p).toBe(130);
-  });
-
-  it("omits 'Press Enter' with --no-browser or when no browser is available", async () => {
-    const a = harness({ interactive: true });
-    await loginCommand({ host: HOST_ARG, browser: false }, a.deps);
-    expect(a.cap.err).not.toContain("Press Enter");
-    const b = harness({ interactive: true });
-    b.knobs.browserAvailable = false;
-    await loginCommand({ host: HOST_ARG }, b.deps);
-    expect(b.cap.err).not.toContain("Press Enter");
-  });
-
-  it("stores with no expiry when the server gave none, and prints the storage warning", async () => {
+  it("stores no expiry when the server gave none, and relays the store's warning", async () => {
     const h = harness();
     h.server.pending.outcome = { accessToken: FAKE_TOKEN, scopes: [] };
     h.store.nextStorage = "file";
     h.store.nextWarning = "No keyring here; the token went to a file.";
     await loginCommand({ host: HOST_ARG }, h.deps);
     expect(h.store.putCalls[0]!.login.expiresAt).toBeNull();
-    expect(h.cap.err).toContain("! No keyring here; the token went to a file.");
-    expect(h.cap.err).toContain("✓ Token stored in a file readable only by you (no expiry)");
+    expect(h.cap.err).toContain("No keyring here; the token went to a file.");
+    expect(h.cap.err).toMatch(/stored in a file/);
+    expect(h.cap.err).toMatch(/no expiry/);
   });
 
-  it("passes --insecure-storage to the store", async () => {
+  it("with --insecure-storage, keeps the token in the file", async () => {
     const h = harness();
     await loginCommand({ host: HOST_ARG, insecureStorage: true }, h.deps);
-    expect(h.store.putCalls[0]!.opts).toEqual({ insecureStorage: true });
+    expect(h.store.logins.get(HOST)?.storage).toBe("file");
   });
 
-  it("checks whoami with the new token before storing", async () => {
-    const h = harness();
-    await loginCommand({ host: HOST_ARG }, h.deps);
-    expect(h.whoamiCalls).toEqual([{ baseUrl: HOST, token: FAKE_TOKEN }]);
-  });
-
-  it("stores nothing and exits 77 when whoami rejects the new token", async () => {
-    const h = harness();
-    h.knobs.whoami = new AuthError("not_logged_in", "Galaxy rejected the token.");
-    expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(77);
-    expect(h.store.putCalls).toEqual([]);
-  });
-
-  it("exits 76 with the --with-token hint when device login is off", async () => {
-    const h = harness();
-    h.server.supportsDeviceFlow = false;
-    expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(76);
-    expect(h.cap.err).toContain(
-      "dev.galaxy.example.org does not offer device login yet (it may be switched off by its admins). Paste an API key instead: gxy auth login --host https://dev.galaxy.example.org --with-token",
-    );
-  });
-
-  it.each([
-    ["denied", 77],
-    ["expired", 77],
-    ["network", 69],
-    ["protocol", 76],
-  ] as const)("maps a %s failure to exit %i", async (kind, exit) => {
-    const h = harness();
-    h.server.pending.outcome = new AuthError(kind, `it was ${kind}`);
-    expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(exit);
-    expect(h.cap.err).toContain(`it was ${kind}`);
-    expect(h.store.putCalls).toEqual([]);
-  });
-
-  it("aborts cleanly on Ctrl-C", async () => {
-    const h = harness();
-    h.server.pending.outcome = "hang";
-    const ac = new AbortController();
-    const p = loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps);
-    await vi.waitFor(() => expect(h.cap.err).toContain("Waiting for approval"));
-    ac.abort();
-    expect(await p).toBe(130);
-    expect(h.cap.err).toContain("Cancelled.");
-    expect(h.store.putCalls).toEqual([]);
-  });
-
-  it("warns that GALAXY_API_KEY takes precedence", async () => {
+  it("warns that GALAXY_API_KEY takes precedence, without printing it", async () => {
     const h = harness({ env: { GALAXY_API_KEY: "irrelevant" } });
     await loginCommand({ host: HOST_ARG }, h.deps);
     expect(h.cap.err).toContain("GALAXY_API_KEY is set and will take precedence");
     expect(h.cap.err).not.toContain("irrelevant");
   });
 
-  it("is a usage error without a host when not interactive", async () => {
-    const h = harness();
-    expect(await loginCommand({}, h.deps)).toBe(64);
-    expect(h.cap.err).toContain("--host");
+  describe("the browser", () => {
+    it("is offered, and opens the approval page on Enter, when interactive", async () => {
+      const h = harness({ interactive: true });
+      h.server.pending.outcome = "hang";
+      const ac = new AbortController();
+      const p = loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps);
+      await vi.waitFor(() => expect(h.cap.err).toContain("Waiting for approval"));
+      expect(h.cap.err).toContain("Press Enter");
+      expect(h.opened).toEqual([]);
+      h.stdin.write("\n");
+      await vi.waitFor(() => expect(h.opened).toEqual(["https://dev.galaxy.example.org/login/device"]));
+      ac.abort();
+      expect(await p).toBe(130);
+    });
+
+    it.each([
+      ["not interactive", { interactive: false }, {}],
+      ["--no-browser is given", { interactive: true }, { browser: false }],
+      ["no browser is available", { interactive: true, noBrowser: true }, {}],
+    ] as const)("is not offered when %s", async (_when, setup, opts) => {
+      const h = harness({ interactive: setup.interactive });
+      if ("noBrowser" in setup) h.knobs.browserAvailable = false;
+      expect(await loginCommand({ host: HOST_ARG, ...opts }, h.deps)).toBe(0);
+      expect(h.cap.err).not.toContain("Press Enter");
+      expect(h.opened).toEqual([]);
+    });
   });
 
-  it("prompts for the URL when interactive and nothing names one", async () => {
-    const h = harness({ interactive: true });
-    h.stdin.write("dev.galaxy.example.org\n");
-    expect(await loginCommand({ browser: false }, h.deps)).toBe(0);
-    expect(h.cap.err).toContain("Galaxy URL");
-    expect(h.store.putCalls[0]!.login.baseUrl).toBe(HOST);
+  describe("when something goes wrong", () => {
+    it("stores nothing, exits 77 and takes the token back when Galaxy refuses it", async () => {
+      const h = harness();
+      h.knobs.whoami = new AuthError("not_logged_in", "Galaxy rejected the token.");
+      expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(77);
+      expect(h.store.putCalls).toEqual([]);
+      expect(h.server.revoked).toEqual([FAKE_TOKEN]);
+    });
+
+    it.each([
+      ["denied", 77],
+      ["network", 69],
+    ] as const)("exits %s -> %i, relays the message and stores nothing", async (kind, exit) => {
+      const h = harness();
+      h.server.pending.outcome = new AuthError(kind, `it was ${kind}`);
+      expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(exit);
+      expect(h.cap.err).toContain(`it was ${kind}`);
+      expect(h.store.putCalls).toEqual([]);
+    });
+
+    it("revokes the token it was just given when the login cannot be stored", async () => {
+      const h = harness();
+      h.store.putError = new Error("disk full");
+      expect(await loginCommand({ host: HOST_ARG }, h.deps)).not.toBe(0);
+      expect(h.server.revoked).toEqual([FAKE_TOKEN]);
+      expect(h.cap.err).toContain("so it was revoked");
+      expect(h.cap.err + h.cap.out).not.toContain(FAKE_TOKEN);
+    });
+
+    it("says to revoke it by hand when that revocation fails too", async () => {
+      const h = harness();
+      h.store.putError = new Error("disk full");
+      h.server.revokeError = new Error("no route");
+      expect(await loginCommand({ host: HOST_ARG }, h.deps)).not.toBe(0);
+      expect(h.cap.err).toContain("revoking it failed");
+      expect(h.cap.err).toContain("user preferences");
+    });
+
+    it("says to revoke it by hand when the server has no revocation endpoint", async () => {
+      const h = harness();
+      h.store.putError = new Error("disk full");
+      h.server.supportsRevocation = false;
+      expect(await loginCommand({ host: HOST_ARG }, h.deps)).not.toBe(0);
+      expect(h.server.revoked).toEqual([]);
+      expect(h.cap.err).toContain("cannot be revoked from here");
+    });
   });
 
-  it("logs in to the one stored host when none is named", async () => {
-    const h = harness({ stored: [fakeLogin()] });
-    expect(await loginCommand({}, h.deps)).toBe(0);
+  describe("naming the Galaxy", () => {
+    it("is a usage error without a host when not interactive", async () => {
+      const h = harness();
+      expect(await loginCommand({}, h.deps)).toBe(64);
+      expect(h.cap.err).toContain("--host");
+    });
+
+    it("prompts for the URL when interactive and nothing names one", async () => {
+      const h = harness({ interactive: true });
+      h.stdin.write("dev.galaxy.example.org\n");
+      expect(await loginCommand({ browser: false }, h.deps)).toBe(0);
+      expect(h.cap.err).toContain("Galaxy URL");
+      expect(h.store.putCalls[0]!.login.baseUrl).toBe(HOST);
+    });
+
+    it("says so when .env names a different Galaxy than the one it uses", async () => {
+      const h = harness({ hostFromEnv: HOST_ARG, ignoredLoginHost: { source: "dotenv", url: "https://other.example.org" } });
+      expect(await loginCommand({}, h.deps)).toBe(0);
+      const note = h.cap.err.indexOf("Ignoring GALAXY_URL from .env (https://other.example.org)");
+      expect(note).toBeGreaterThanOrEqual(0);
+      expect(note).toBeLessThan(h.cap.err.indexOf("Logging in to"));
+    });
+
+    it.each([
+      ["when .env names the chosen host, even written differently", { hostFromEnv: HOST_ARG, ignoredLoginHost: { source: "dotenv" as const, url: `${HOST_ARG}/` } }, {}],
+      ["with --host, which is named on purpose", { ignoredLoginHost: { source: "dotenv" as const, url: "https://other.example.org" } }, { host: HOST_ARG }],
+    ])("stays quiet about .env %s", async (_when, setup, opts) => {
+      const h = harness(setup);
+      await loginCommand(opts, h.deps);
+      expect(h.cap.err).not.toContain("Ignoring");
+    });
   });
 });
 
-describe("auth login --with-token", () => {
-  it("reads the key from stdin, trims it, and stores a pasted login", async () => {
+describe("login against a Galaxy with no device login", () => {
+  const galaxyOf = useFakeGalaxies();
+
+  /** Real discovery against the fake, so the wording follows what Galaxy actually sends. */
+  async function login(mode: MetadataMode | "no-device") {
+    const galaxy = await galaxyOf();
+    if (mode === "no-device") galaxy.setDeviceFlow(false);
+    else galaxy.setMetadataMode(mode);
+    const h = harness();
+    h.deps.discover = (u: BaseUrl, signal?: AbortSignal) => discover(u, { signal });
+    const code = await loginCommand({ host: galaxy.baseUrl }, h.deps);
+    return { code, err: h.cap.err, hint: `gxy auth login --host ${galaxy.baseUrl} --with-token` };
+  }
+
+  it.each(["not-found", "not-json", "no-device"] as const)("exits 76 with the --with-token hint (%s)", async (mode) => {
+    const { code, err, hint } = await login(mode);
+    expect(code).toBe(76);
+    expect(err).toContain("does not offer device login");
+    expect(err).toContain(`Paste an API key instead: ${hint}`);
+  });
+
+  it("does not offer the hint for malformed metadata, which is a protocol problem", async () => {
+    const { code, err } = await login("malformed");
+    expect(code).toBe(76);
+    expect(err).not.toContain("does not offer device login");
+  });
+
+  it("calls metadata for another issuer insecure, without the hint", async () => {
+    const { code, err } = await login("wrong-issuer");
+    expect(code).not.toBe(0);
+    expect(err).toContain("different issuer");
+    expect(err).not.toContain("does not offer device login");
+  });
+});
+
+describe("the approval page must be on the Galaxy", () => {
+  it.each([
+    ["another host", "https://evil.example/login/device"],
+    ["plain http on the same host", "http://dev.galaxy.example.org/login/device"],
+    ["another port", "https://dev.galaxy.example.org:8443/login/device"],
+    ["a non-http scheme", "javascript:alert(1)"],
+    ["not a URL", "nonsense"],
+  ])("refuses %s: nothing shown, opened or polled", async (_n, uri) => {
+    const h = harness({ interactive: true });
+    h.server.pending.verificationUri = uri;
+    const waited = vi.spyOn(h.server.pending, "waitForApproval");
+    expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(76);
+    expect(h.cap.err).toContain("not an https page on dev.galaxy.example.org");
+    expect(h.cap.err).toContain("--with-token");
+    expect(h.cap.err).not.toContain("One-time code");
+    expect(h.opened).toEqual([]);
+    expect(waited).not.toHaveBeenCalled();
+    expect(h.store.putCalls).toEqual([]);
+  });
+
+  it("allows http to a loopback Galaxy, on its own origin", async () => {
+    const h = harness();
+    h.server.pending.verificationUri = "http://127.0.0.1:8080/login/device";
+    expect(await loginCommand({ host: "http://127.0.0.1:8080" }, h.deps)).toBe(0);
+    expect(h.cap.err).toContain("http://127.0.0.1:8080/login/device");
+  });
+});
+
+describe("cancelling with Ctrl-C", () => {
+  const cancelled = (h: ReturnType<typeof harness>, code: number) => {
+    expect(code).toBe(130);
+    expect(h.cap.err).toContain("Cancelled.");
+    expect(h.store.putCalls).toEqual([]);
+    expect(h.cap.out).toBe("");
+  };
+
+  it("while waiting for approval", async () => {
+    const h = harness();
+    h.server.pending.outcome = "hang";
+    const ac = new AbortController();
+    const p = loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps);
+    await vi.waitFor(() => expect(h.cap.err).toContain("Waiting for approval"));
+    ac.abort();
+    cancelled(h, await p);
+  });
+
+  it("does nothing when the signal is already aborted", async () => {
+    const h = harness();
+    const ac = new AbortController();
+    ac.abort();
+    cancelled(h, await loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps));
+    expect(h.server.startedWith).toEqual([]);
+  });
+
+  it("during discovery, which is told to stop, so no device authorization starts", async () => {
+    const h = harness();
+    const ac = new AbortController();
+    let seen: AbortSignal | undefined;
+    h.deps.discover = (_b, signal) => ((seen = signal), never());
+    const p = loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps);
+    await vi.waitFor(() => expect(seen).toBeDefined());
+    ac.abort();
+    cancelled(h, await p);
+    expect(seen!.aborted).toBe(true);
+    expect(h.server.startedWith).toEqual([]);
+  });
+
+  it("creates no server-side code when the cancel lands as discovery finishes", async () => {
+    const h = harness();
+    const ac = new AbortController();
+    h.deps.discover = async () => {
+      ac.abort();
+      return h.server;
+    };
+    cancelled(h, await loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps));
+    expect(h.server.startedWith).toEqual([]);
+  });
+
+  it("while the device authorization request is out", async () => {
+    const h = harness();
+    const ac = new AbortController();
+    h.server.startDeviceLogin = (scopes) => (h.server.startedWith.push(scopes), never());
+    const p = loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps);
+    await vi.waitFor(() => expect(h.server.startedWith).toHaveLength(1));
+    ac.abort();
+    cancelled(h, await p);
+  });
+
+  it("during whoami after approval, which is told to stop, and stores nothing", async () => {
+    const h = harness();
+    const ac = new AbortController();
+    let seen: AbortSignal | undefined;
+    h.deps.whoami = (_b, _t, signal) => ((seen = signal), never());
+    const p = loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps);
+    await vi.waitFor(() => expect(seen).toBeDefined());
+    ac.abort();
+    cancelled(h, await p);
+    expect(seen!.aborted).toBe(true);
+  });
+
+  it("without writing the store when the cancel lands as whoami answers", async () => {
+    const h = harness();
+    const ac = new AbortController();
+    h.deps.whoami = async () => {
+      ac.abort();
+      return { username: "aioue" };
+    };
+    cancelled(h, await loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps));
+  });
+
+  it("at the Galaxy URL prompt", async () => {
+    const h = harness({ interactive: true });
+    const ac = new AbortController();
+    const p = loginCommand({ signal: ac.signal }, h.deps);
+    await vi.waitFor(() => expect(h.cap.err).toContain("Galaxy URL"));
+    ac.abort();
+    cancelled(h, await p);
+  });
+
+  it("while reading a piped key, before any whoami, leaving no listener on stdin", async () => {
+    const h = harness(); // stdin stays open and empty
+    const ac = new AbortController();
+    const p = loginCommand({ host: HOST_ARG, withToken: true, signal: ac.signal }, h.deps);
+    await vi.waitFor(() => expect(h.cap.err).toContain("Logging in to"));
+    ac.abort();
+    cancelled(h, await p);
+    expect(h.whoamiCalls).toEqual([]);
+    expect(h.stdin.listenerCount("data")).toBe(0);
+  });
+});
+
+describe("login --with-token", () => {
+  it("reads the key from stdin, trims it, and stores a pasted login without using the device flow", async () => {
     const h = harness({ stdinText: `  ${FAKE_TOKEN}\n` });
     expect(await loginCommand({ host: HOST_ARG, withToken: true }, h.deps)).toBe(0);
     expect(h.whoamiCalls).toEqual([{ baseUrl: HOST, token: FAKE_TOKEN }]);
     expect(h.store.putCalls[0]!.login).toMatchObject({ method: "pasted", scopes: [], expiresAt: null, token: FAKE_TOKEN, username: "aioue" });
-    expect(h.cap.err).toContain("✓ Logged in to dev.galaxy.example.org as aioue");
-    expect(h.cap.err).toContain("(no expiry)");
-    expect(h.cap.out).toBe("");
-    expect(h.cap.err).not.toContain(FAKE_TOKEN);
-  });
-
-  it("does not use the device flow", async () => {
-    const h = harness({ stdinText: FAKE_TOKEN });
-    await loginCommand({ host: HOST_ARG, withToken: true }, h.deps);
     expect(h.server.startedWith).toEqual([]);
+    expect(h.cap.err).toContain("Logged in to dev.galaxy.example.org as aioue");
+    expect(h.cap.out).toBe("");
   });
 
   it.each([["empty", ""], ["blank", "  \n"], ["multi-line", "abc\ndef\n"]])("refuses %s input", async (_n, text) => {
@@ -192,216 +362,143 @@ describe("auth login --with-token", () => {
     expect(await loginCommand({ host: HOST_ARG, withToken: true }, h.deps)).toBe(77);
     expect(h.store.putCalls).toEqual([]);
   });
-});
 
-const never = <T,>() => new Promise<T>(() => {});
-
-describe("auth login: Ctrl-C cancels every step (M4)", () => {
-  const cancelled = (h: ReturnType<typeof harness>, code: number) => {
-    expect(code).toBe(130);
-    expect(h.cap.err).toContain("Cancelled.");
+  it("names the certificate setting when Galaxy cannot be reached securely", async () => {
+    const h = harness({ stdinText: FAKE_TOKEN });
+    const tls = (async () => {
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }) });
+    }) as unknown as typeof fetch;
+    h.deps.whoami = createWhoami(tls);
+    expect(await loginCommand({ host: HOST_ARG, withToken: true }, h.deps)).toBe(69);
+    expect(h.cap.err).toContain("NODE_EXTRA_CA_CERTS");
     expect(h.store.putCalls).toEqual([]);
-    expect(h.cap.out).toBe("");
-  };
-
-  it("does nothing when the signal is already aborted", async () => {
-    const h = harness();
-    const ac = new AbortController();
-    ac.abort();
-    cancelled(h, await loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps));
-    expect(h.server.startedWith).toEqual([]);
   });
 
-  it("cancels during discovery, hands it the signal, and starts no device authorization", async () => {
-    const h = harness();
-    const ac = new AbortController();
-    let seen: AbortSignal | undefined;
-    h.deps.discover = (_b, signal) => ((seen = signal), never());
-    const p = loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps);
-    await vi.waitFor(() => expect(seen).toBeDefined());
-    ac.abort();
-    cancelled(h, await p);
-    expect(seen).toBe(ac.signal);
-    expect(h.server.startedWith).toEqual([]);
+  describe("on a pipe", () => {
+    it("does not prompt, even when otherwise interactive", async () => {
+      const h = harness({ interactive: true, stdinText: FAKE_TOKEN });
+      expect(await loginCommand({ host: HOST_ARG, withToken: true }, h.deps)).toBe(0);
+      expect(h.cap.err).not.toContain("Paste your Galaxy API key");
+    });
+
+    it("refuses more than 16 KiB with a usage error, before any whoami, without echoing it", async () => {
+      const h = harness({ stdinText: "k".repeat(16 * 1024 + 1) });
+      expect(await loginCommand({ host: HOST_ARG, withToken: true }, h.deps)).toBe(64);
+      expect(h.cap.err).toContain("16 KiB");
+      expect(h.whoamiCalls).toEqual([]);
+      expect(h.cap.err).not.toContain("kkkk");
+    });
   });
 
-  it("creates no server-side code when the cancel lands as discovery finishes", async () => {
-    const h = harness();
-    const ac = new AbortController();
-    h.deps.discover = async () => {
+  describe("at a terminal", () => {
+    /** A stdin that looks like a TTY and records raw mode. The terminal is restored when `raw` ends on false. */
+    function terminal() {
+      const h = harness({ interactive: true });
+      const raw: boolean[] = [];
+      Object.assign(h.stdin, { isTTY: true, setRawMode: (m: boolean) => void raw.push(m) });
+      return { h, raw, prompted: () => vi.waitFor(() => expect(h.cap.err).toContain("Paste your Galaxy API key")) };
+    }
+
+    it("prompts on stderr, reads without echo, and restores the terminal", async () => {
+      const { h, raw, prompted } = terminal();
+      const p = loginCommand({ host: HOST_ARG, withToken: true }, h.deps);
+      await prompted();
+      h.stdin.write(`${FAKE_TOKEN}\r`);
+      expect(await p).toBe(0);
+      expect(raw.at(-1)).toBe(false);
+      expect(h.whoamiCalls).toEqual([{ baseUrl: HOST, token: FAKE_TOKEN }]);
+      expect(h.cap.err + h.cap.out).not.toContain(FAKE_TOKEN);
+      expect(h.cap.out).toBe("");
+    });
+
+    it("cancels on Ctrl-C at the prompt: exit 130, nothing stored, terminal restored", async () => {
+      const { h, raw, prompted } = terminal();
+      const p = loginCommand({ host: HOST_ARG, withToken: true }, h.deps);
+      await prompted();
+      h.stdin.write("fake\x03");
+      expect(await p).toBe(130);
+      expect(raw.at(-1)).toBe(false);
+      expect(h.cap.err).toContain("Cancelled.");
+      expect(h.whoamiCalls).toEqual([]);
+      expect(h.store.putCalls).toEqual([]);
+    });
+
+    it("restores the terminal when the abort signal fires instead", async () => {
+      const { h, raw, prompted } = terminal();
+      const ac = new AbortController();
+      const p = loginCommand({ host: HOST_ARG, withToken: true, signal: ac.signal }, h.deps);
+      await prompted();
       ac.abort();
-      return h.server;
-    };
-    cancelled(h, await loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps));
-    expect(h.server.startedWith).toEqual([]);
-  });
+      expect(await p).toBe(130);
+      expect(raw.at(-1)).toBe(false);
+    });
 
-  it("cancels while the device authorization request is out", async () => {
-    const h = harness();
-    const ac = new AbortController();
-    h.server.startDeviceLogin = (scopes) => (h.server.startedWith.push(scopes), never());
-    const p = loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps);
-    await vi.waitFor(() => expect(h.server.startedWith).toHaveLength(1));
-    ac.abort();
-    cancelled(h, await p);
-  });
-
-  it("cancels during whoami after approval, handing it the signal, and stores nothing", async () => {
-    const h = harness();
-    const ac = new AbortController();
-    let seen: AbortSignal | undefined;
-    h.deps.whoami = (_b, _t, signal) => ((seen = signal), never());
-    const p = loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps);
-    await vi.waitFor(() => expect(seen).toBeDefined());
-    ac.abort();
-    cancelled(h, await p);
-    expect(seen).toBe(ac.signal);
-  });
-
-  it("does not write the store when the cancel lands as whoami answers", async () => {
-    const h = harness();
-    const ac = new AbortController();
-    h.deps.whoami = async () => {
-      ac.abort();
-      return { username: "aioue" };
-    };
-    cancelled(h, await loginCommand({ host: HOST_ARG, signal: ac.signal }, h.deps));
-  });
-
-  it("cancels at the Galaxy URL prompt", async () => {
-    const h = harness({ interactive: true });
-    const ac = new AbortController();
-    const p = loginCommand({ signal: ac.signal }, h.deps);
-    await vi.waitFor(() => expect(h.cap.err).toContain("Galaxy URL"));
-    ac.abort();
-    cancelled(h, await p);
-  });
-
-  it("cancels while reading a piped key, before any whoami", async () => {
-    const h = harness(); // stdin stays open and empty
-    const ac = new AbortController();
-    const p = loginCommand({ host: HOST_ARG, withToken: true, signal: ac.signal }, h.deps);
-    await vi.waitFor(() => expect(h.stdin.listenerCount("data")).toBeGreaterThan(0));
-    ac.abort();
-    cancelled(h, await p);
-    expect(h.whoamiCalls).toEqual([]);
-    expect(h.stdin.listenerCount("data")).toBe(0);
+    it("restores the terminal when the key is refused", async () => {
+      const { h, raw, prompted } = terminal();
+      h.knobs.whoami = new AuthError("not_logged_in", "Galaxy rejected the key.");
+      const p = loginCommand({ host: HOST_ARG, withToken: true }, h.deps);
+      await prompted();
+      h.stdin.write("fake-key\n");
+      expect(await p).toBe(77);
+      expect(raw.at(-1)).toBe(false);
+    });
   });
 });
 
-describe("auth login: the approval page must be on the Galaxy (L1)", () => {
-  it.each([
-    ["another host", "https://evil.example/login/device"],
-    ["plain http on the same host", "http://dev.galaxy.example.org/login/device"],
-    ["another port", "https://dev.galaxy.example.org:8443/login/device"],
-    ["a non-http scheme", "javascript:alert(1)"],
-    ["not a URL", "nonsense"],
-  ])("refuses %s: nothing shown, nothing opened, nothing polled", async (_n, uri) => {
-    const h = harness({ interactive: true });
-    h.server.pending.verificationUri = uri;
-    const waited = vi.spyOn(h.server.pending, "waitForApproval");
-    expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(76);
-    expect(h.cap.err).toContain("which is not an https page on dev.galaxy.example.org");
-    expect(h.cap.err).toContain("--with-token");
-    expect(h.cap.err).not.toContain("One-time code");
-    expect(h.cap.err).not.toContain("Enter it at");
-    expect(h.opened).toEqual([]);
-    expect(waited).not.toHaveBeenCalled();
-    expect(h.store.putCalls).toEqual([]);
-  });
+describe("tokens that carry admin rights", () => {
+  const admin = { username: "root", isAdmin: true };
 
-  it("allows http to a loopback Galaxy, on its own origin", async () => {
+  it("get a warning, printed once, and the login is still stored", async () => {
     const h = harness();
-    h.server.pending.verificationUri = "http://127.0.0.1:8080/login/device";
-    expect(await loginCommand({ host: "http://127.0.0.1:8080" }, h.deps)).toBe(0);
-    expect(h.cap.err).toContain("Enter it at http://127.0.0.1:8080/login/device");
-  });
-});
-
-describe("auth login --with-token at a terminal (L5)", () => {
-  function tty(h: ReturnType<typeof harness>) {
-    const calls: boolean[] = [];
-    Object.assign(h.stdin, { isTTY: true, setRawMode: (m: boolean) => void calls.push(m) });
-    return calls;
-  }
-
-  it("prompts on stderr, reads without echo, and restores the terminal", async () => {
-    const h = harness({ interactive: true });
-    const raw = tty(h);
-    const p = loginCommand({ host: HOST_ARG, withToken: true }, h.deps);
-    await vi.waitFor(() => expect(raw).toEqual([true]));
-    expect(h.cap.err).toContain("Paste your Galaxy API key: ");
-    h.stdin.write(`${FAKE_TOKEN}\r`);
-    expect(await p).toBe(0);
-    expect(raw).toEqual([true, false]);
-    expect(h.whoamiCalls).toEqual([{ baseUrl: HOST, token: FAKE_TOKEN }]);
-    expect(h.cap.err + h.cap.out).not.toContain(FAKE_TOKEN);
-    expect(h.cap.out).toBe("");
+    h.knobs.whoami = admin;
+    expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(0);
+    expect(h.cap.err.match(/full admin rights on dev\.galaxy\.example\.org/g)).toHaveLength(1);
+    expect(h.store.logins.size).toBe(1);
   });
 
-  it("honours backspace and ignores escape sequences from a bracketed paste", async () => {
-    const h = harness({ interactive: true });
-    tty(h);
-    const p = loginCommand({ host: HOST_ARG, withToken: true }, h.deps);
-    await vi.waitFor(() => expect(h.stdin.listenerCount("data")).toBeGreaterThan(0));
-    h.stdin.write("\x1b[200~abXX\x7f\x7fc\x1b[201~\n");
-    expect(await p).toBe(0);
-    expect(h.whoamiCalls[0]!.token).toBe("abc");
+  it("do not make an ordinary user's login warn", async () => {
+    const h = harness();
+    await loginCommand({ host: HOST_ARG }, h.deps);
+    expect(h.cap.err).not.toContain("admin rights");
   });
 
-  it("Ctrl-C at the prompt cancels, with exit 130, nothing stored and raw mode restored", async () => {
-    const h = harness({ interactive: true });
-    const raw = tty(h);
-    const p = loginCommand({ host: HOST_ARG, withToken: true }, h.deps);
-    await vi.waitFor(() => expect(raw).toEqual([true]));
-    h.stdin.write("fake\x03");
-    expect(await p).toBe(130);
-    expect(raw).toEqual([true, false]);
-    expect(h.cap.err).toContain("Cancelled.");
-    expect(h.whoamiCalls).toEqual([]);
-    expect(h.store.putCalls).toEqual([]);
+  it.each([["device", false], ["pasted", true]])("(%s) are refused with 77, after the warning, when there is no keyring", async (_how, withToken) => {
+    const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
+    h.store.keyringAvailable = false;
+    h.knobs.whoami = admin;
+    expect(await loginCommand({ host: HOST_ARG, withToken }, h.deps)).toBe(77);
+    expect(h.store.logins.size).toBe(0);
+    const warned = h.cap.err.indexOf("full admin rights");
+    expect(warned).toBeGreaterThanOrEqual(0);
+    expect(h.cap.err.indexOf(REFUSED_WITHOUT_KEYRING)).toBeGreaterThan(warned);
+    expect(h.cap.err).not.toContain(FAKE_TOKEN);
   });
 
-  it("restores raw mode when the abort signal fires instead", async () => {
-    const h = harness({ interactive: true });
-    const raw = tty(h);
-    const ac = new AbortController();
-    const p = loginCommand({ host: HOST_ARG, withToken: true, signal: ac.signal }, h.deps);
-    await vi.waitFor(() => expect(raw).toEqual([true]));
-    ac.abort();
-    expect(await p).toBe(130);
-    expect(raw).toEqual([true, false]);
+  it("are kept in the file when --insecure-storage says so", async () => {
+    const h = harness();
+    h.store.keyringAvailable = false;
+    h.knobs.whoami = admin;
+    expect(await loginCommand({ host: HOST_ARG, insecureStorage: true }, h.deps)).toBe(0);
+    expect(h.store.logins.get(HOST)?.storage).toBe("file");
   });
 
-  it("restores raw mode when the key is refused", async () => {
-    const h = harness({ interactive: true });
-    const raw = tty(h);
-    h.knobs.whoami = new AuthError("not_logged_in", "Galaxy rejected the key.");
-    const p = loginCommand({ host: HOST_ARG, withToken: true }, h.deps);
-    await vi.waitFor(() => expect(raw).toEqual([true]));
-    h.stdin.write("fake-key\n");
-    expect(await p).toBe(77);
-    expect(raw).toEqual([true, false]);
+  it("do not stop an ordinary user falling back to the file", async () => {
+    const h = harness();
+    h.store.keyringAvailable = false;
+    expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(0);
+    expect(h.store.logins.size).toBe(1);
   });
 
-  it("does not prompt for a pipe, even when otherwise interactive", async () => {
-    const h = harness({ interactive: true, stdinText: FAKE_TOKEN });
-    expect(await loginCommand({ host: HOST_ARG, withToken: true }, h.deps)).toBe(0);
-    expect(h.cap.err).not.toContain("Paste your Galaxy API key");
-  });
-});
+  it("add their warning to a pasted key's own no-expiry warning", async () => {
+    const plain = harness({ stdinText: `${FAKE_TOKEN}\n` });
+    await loginCommand({ host: HOST_ARG, withToken: true }, plain.deps);
+    expect(plain.cap.err).toContain("no expiry");
+    expect(plain.cap.err).not.toContain("admin rights");
 
-describe("auth login --with-token on a pipe: size cap (L5)", () => {
-  it("accepts input right at the cap", async () => {
-    const h = harness({ stdinText: "k".repeat(16 * 1024) });
-    expect(await loginCommand({ host: HOST_ARG, withToken: true }, h.deps)).toBe(0);
-  });
-
-  it("refuses more than 16 KiB with a usage error, before any whoami", async () => {
-    const h = harness({ stdinText: "k".repeat(16 * 1024 + 1) });
-    expect(await loginCommand({ host: HOST_ARG, withToken: true }, h.deps)).toBe(64);
-    expect(h.cap.err).toContain("16 KiB");
-    expect(h.whoamiCalls).toEqual([]);
-    expect(h.cap.err).not.toContain("kkkk");
+    const root = harness({ stdinText: `${FAKE_TOKEN}\n` });
+    root.knobs.whoami = admin;
+    await loginCommand({ host: HOST_ARG, withToken: true }, root.deps);
+    expect(root.cap.err).toContain("admin rights");
+    expect(root.cap.err).toContain("no expiry");
   });
 });

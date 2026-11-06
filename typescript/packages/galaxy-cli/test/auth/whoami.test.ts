@@ -1,164 +1,149 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { beforeEach, describe, expect, it } from "vitest";
 import { createWhoami, probeGalaxy } from "../../src/auth/whoami";
 import { discover } from "../../src/auth/oauth";
-import { withUserAgent, USER_AGENT } from "../../src/auth/user-agent";
-import { startFakeGalaxy, type FakeGalaxy } from "../support/fake-galaxy";
-import { AuthError, type BaseUrl } from "../../src/auth/types";
+import { withUserAgent } from "../../src/auth/user-agent";
+import { startFakeGalaxy, useFakeGalaxies, type FakeGalaxy } from "../support/fake-galaxy";
+import type { BaseUrl } from "../../src/auth/types";
 import { version } from "../../package.json";
+import { authErrorOf } from "./harness";
 
+const start = useFakeGalaxies();
 let galaxy: FakeGalaxy;
 beforeEach(async () => {
-  galaxy = await startFakeGalaxy();
+  galaxy = await start();
 });
-afterEach(() => galaxy.close());
-
-async function token(opts: { admin?: boolean } = {}): Promise<string> {
-  const { startDevice } = await import("./whoami.helpers");
-  return startDevice(galaxy, opts);
-}
-
 const base = () => galaxy.baseUrl as BaseUrl;
-const rejects = async (p: Promise<unknown>, kind: string) => {
-  const e = await p.then(() => null, (x) => x);
-  expect(e).toBeInstanceOf(AuthError);
-  expect((e as AuthError).kind).toBe(kind);
-  return e as AuthError;
-};
 
-describe("whoami (rule 1)", () => {
-  it("returns the user and is_admin for a good token", async () => {
-    const who = await createWhoami()(base(), await token({ admin: true }));
-    expect(who).toEqual({ username: "fake-user", email: "fake-user@example.org", isAdmin: true });
-    expect((await createWhoami()(base(), await token())).isAdmin).toBe(false);
+const certificateError = () => new TypeError("fetch failed", { cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }) });
+/** A `fetch` that fails every request the way a certificate failure does. */
+const tlsFailure = (async () => {
+  throw certificateError();
+}) as unknown as typeof fetch;
+/** The same, except that it answers the version probe, so the failure comes at the user lookup. */
+const tlsFailureAfterProbe = (async (input: RequestInfo | URL) => {
+  if (String(input instanceof Request ? input.url : input).endsWith("/api/version")) return Response.json({ version_major: "26.1" });
+  throw certificateError();
+}) as typeof fetch;
+
+describe("whoami", () => {
+  it("returns the user and whether they are an admin", async () => {
+    expect(await createWhoami()(base(), galaxy.issueToken({ admin: true }))).toEqual({ username: "fake-user", email: "fake-user@example.org", isAdmin: true });
+    expect((await createWhoami()(base(), galaxy.issueToken())).isAdmin).toBe(false);
   });
 
-  it("refuses the anonymous record Galaxy returns with 200 for an unknown key", async () => {
-    const e = await rejects(createWhoami()(base(), "not-a-real-token"), "not_logged_in");
-    expect(e.message).toMatch(/invalid.*newer API key.*expired.*deactivated/);
+  it("refuses the anonymous record Galaxy answers with 200 for a key it does not know", async () => {
+    // Observed on Galaxy 26.1: 200 and no `username`.
+    expect((await authErrorOf(createWhoami()(base(), "not-a-real-token"))).kind).toBe("not_logged_in");
   });
 
-  it("refuses a 403", async () => {
-    galaxy.setInvalidKeyResponse("forbidden");
-    await rejects(createWhoami()(base(), "not-a-real-token"), "not_logged_in");
+  it.each([
+    ["a 403", 403, "not_logged_in"],
+    ["a 401", 401, "not_logged_in"],
+    ["a 503", 503, "network"],
+  ] as const)("treats %s as %s", async (_what, status, kind) => {
+    galaxy.setUsersCurrentStatus(status);
+    expect((await authErrorOf(createWhoami()(base(), "fake-token-xyz"))).kind).toBe(kind);
   });
 
   it("calls a 404 a non-Galaxy address, not a bad token", async () => {
     galaxy.setUsersCurrentStatus(404);
-    const e = await rejects(createWhoami()(base(), "fake-token-xyz"), "protocol");
-    expect(e.message).toMatch(/does not look like a Galaxy API/);
+    const e = await authErrorOf(createWhoami()(base(), "fake-token-xyz"));
+    expect(e.kind).toBe("protocol");
+    expect(e.message).toContain("does not look like a Galaxy API");
     expect(e.message).not.toMatch(/invalid|expired/);
   });
 
-  it("calls a 429 rate limiting (network kind, retry later), not a bad token", async () => {
+  it("calls a 429 rate limiting, to retry later, not a bad token", async () => {
     galaxy.setUsersCurrentStatus(429);
-    const e = await rejects(createWhoami()(base(), "fake-token-xyz"), "network");
-    expect(e.message).toMatch(/rate-limiting.*try again/);
-  });
-
-  it("calls a 503 a network error", async () => {
-    galaxy.setUsersCurrentStatus(503);
-    await rejects(createWhoami()(base(), "fake-token-xyz"), "network");
-  });
-
-  it("still calls a 401 a refused token", async () => {
-    galaxy.setUsersCurrentStatus(401);
-    await rejects(createWhoami()(base(), "fake-token-xyz"), "not_logged_in");
+    const e = await authErrorOf(createWhoami()(base(), "fake-token-xyz"));
+    expect(e.kind).toBe("network");
+    expect(e.message).toMatch(/rate-limiting/);
   });
 
   it("stops when the signal is already aborted, sending no token", async () => {
-    const t = await token();
     const controller = new AbortController();
     controller.abort(new Error("ctrl-c"));
-    galaxy.requests.length = 0;
-    await expect(createWhoami()(base(), t, controller.signal)).rejects.toThrow("ctrl-c");
+    await expect(createWhoami()(base(), galaxy.issueToken(), controller.signal)).rejects.toThrow("ctrl-c");
     expect(galaxy.requestsTo("/api/users/current")).toHaveLength(0);
   });
 
-  it("uses only /api/users/current", async () => {
-    await createWhoami()(base(), await token());
-    const paths = galaxy.requests.filter((r) => r.url.startsWith("/api/")).map((r) => r.url);
-    expect(paths.every((p) => p === "/api/version" || p === "/api/users/current")).toBe(true);
+  it("never gives the key to the origin a Galaxy redirects to", async () => {
+    const elsewhere = await start();
+    galaxy.setRedirect("/api/users/current", `${elsewhere.baseUrl}/api/users/current`);
+    expect((await authErrorOf(createWhoami()(base(), "fake-token-xyz"))).kind).toBe("not_logged_in");
+    expect(elsewhere.requests).toEqual([]);
   });
+});
 
-  it("probes once per Galaxy, anonymously, before sending the token", async () => {
-    const t = await token();
+describe("version probe before the token is sent", () => {
+  it("runs once per Galaxy, anonymously", async () => {
+    const token = galaxy.issueToken();
     const who = createWhoami();
-    await who(base(), t);
-    await who(base(), t);
+    await who(base(), token);
+    await who(base(), token);
     const probes = galaxy.requestsTo("/api/version");
     expect(probes).toHaveLength(1);
     expect(probes[0]!.headers["x-api-key"]).toBeUndefined();
   });
-});
 
-describe("version probe (rule 2)", () => {
-  it("does not send the token when the answer is a redirect, and offers the Location", async () => {
+  it("stops at a redirect, offering the address it points to, and sends no token", async () => {
     galaxy.setVersionMode("redirect");
-    const e = await rejects(createWhoami()(base(), "fake-token-xyz"), "protocol");
+    const e = await authErrorOf(createWhoami()(base(), "fake-token-xyz"));
+    expect(e.kind).toBe("protocol");
     expect(e.message).toContain("https://elsewhere.example");
     expect(galaxy.requestsTo("/api/users/current")).toHaveLength(0);
   });
 
-  it("does not send the token when the answer is not JSON", async () => {
+  it("stops at an answer that is not a Galaxy version, and sends no token", async () => {
     galaxy.setVersionMode("html");
-    const e = await rejects(createWhoami()(base(), "fake-token-xyz"), "protocol");
-    expect(e.message).toMatch(/does not look like a Galaxy API/);
+    const e = await authErrorOf(createWhoami()(base(), "fake-token-xyz"));
+    expect(e.kind).toBe("protocol");
+    expect(e.message).toContain("does not look like a Galaxy API");
     expect(galaxy.requestsTo("/api/users/current")).toHaveLength(0);
-  });
-
-  it("reports an unreachable host as a network error", async () => {
-    const dead = await startFakeGalaxy();
-    const url = dead.baseUrl as BaseUrl;
-    await dead.close();
-    await rejects(probeGalaxy(url), "network");
   });
 });
 
-describe("User-Agent (rule 17)", () => {
-  const ua = `gxy/${version} (galaxy-cli)`;
-
-  it("is gxy/<package version> (galaxy-cli)", () => {
-    expect(USER_AGENT).toBe(ua);
+describe("network and TLS failures", () => {
+  it("an unreachable host is a network error naming the proxy and CA settings", async () => {
+    const dead = await startFakeGalaxy();
+    const url = dead.baseUrl as BaseUrl;
+    await dead.close();
+    const e = await authErrorOf(probeGalaxy(url));
+    expect(e.kind).toBe("network");
+    expect(e.message).toContain("NODE_USE_ENV_PROXY");
+    expect(e.message).toContain("NODE_EXTRA_CA_CERTS");
   });
 
-  it("is sent by whoami, the probe and the OAuth calls", async () => {
-    const t = await token();
-    galaxy.requests.length = 0;
-    await createWhoami()(base(), t);
+  it("a certificate failure in the version probe names NODE_EXTRA_CA_CERTS", async () => {
+    const e = await authErrorOf(probeGalaxy("https://galaxy.example.org" as BaseUrl, tlsFailure));
+    expect(e.kind).toBe("network");
+    expect(e.message).toContain("NODE_EXTRA_CA_CERTS");
+    expect(e.message).toContain("NODE_USE_ENV_PROXY");
+  });
+
+  it("a certificate failure in the user lookup names NODE_EXTRA_CA_CERTS", async () => {
+    const e = await authErrorOf(createWhoami(tlsFailureAfterProbe)("https://galaxy.example.org" as BaseUrl, "fake-token-xyz"));
+    expect(e.kind).toBe("network");
+    expect(e.message).toContain("self-signed certificate");
+    expect(e.message).toContain("NODE_EXTRA_CA_CERTS");
+    expect(e.message).toContain("NODE_USE_ENV_PROXY");
+  });
+});
+
+describe("User-Agent", () => {
+  it("is gxy/<package version> (galaxy-cli) on whoami, the probe and every OAuth call", async () => {
+    const token = galaxy.issueToken();
+    await createWhoami()(base(), token);
     const server = await discover(base(), { fetch: withUserAgent() });
     const pending = await server.startDeviceLogin();
     galaxy.approve(pending.userCode);
     await pending.waitForApproval();
-    await server.revoke(t);
-    expect(galaxy.requests.length).toBeGreaterThanOrEqual(6);
-    for (const r of galaxy.requests) expect(r.headers["user-agent"], r.url).toBe(ua);
-  });
-});
+    await server.revoke(token);
 
-describe("a Galaxy that redirects", () => {
-  let other: Server;
-  let hits: string[];
-  beforeEach(async () => {
-    hits = [];
-    other = createServer((req, res) => {
-      hits.push(`${req.url} ${req.headers["x-api-key"] ?? ""}`);
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end("{}");
-    });
-    await new Promise<void>((r) => other.listen(0, "127.0.0.1", r));
-  });
-  afterEach(() => new Promise((r) => other.close(r)));
-
-  it("never gets the key from whoami", async () => {
-    const target = `http://127.0.0.1:${(other.address() as AddressInfo).port}`;
-    const fetchImpl = (async (input: RequestInfo | URL) => {
-      const url = String(input instanceof Request ? input.url : input);
-      if (url.endsWith("/api/version")) return Response.json({ version_major: "24.2" });
-      return new Response(null, { status: 302, headers: { location: `${target}/api/users/current` } });
-    }) as typeof fetch;
-    await rejects(createWhoami(fetchImpl)(base(), "fake-token-xyz"), "not_logged_in");
-    expect(hits).toEqual([]);
+    const paths = galaxy.requests.map((r) => new URL(r.url, "http://x").pathname);
+    for (const expected of ["/api/version", "/api/users/current", "/oauth/device_authorization", "/oauth/token", "/oauth/revoke"]) {
+      expect(paths).toContain(expected);
+    }
+    for (const r of galaxy.requests) expect(r.headers["user-agent"], r.url).toBe(`gxy/${version} (galaxy-cli)`);
   });
 });

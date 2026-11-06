@@ -7,7 +7,7 @@ import { tokenCommand } from "../../src/auth/commands/token";
 import { envCommand } from "../../src/auth/commands/env";
 import { headersCommand } from "../../src/auth/commands/headers";
 import { resolveConnection } from "../../src/config";
-import { HOST, fakeLogin, harness, DAY } from "./fakes";
+import { HOST, fakeLogin, harness, DAY } from "./harness";
 
 const now = new Date(DAY);
 const at = (ms: number) => new Date(now.getTime() + ms).toISOString();

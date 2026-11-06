@@ -211,7 +211,7 @@ export async function discover(baseUrl: BaseUrl, options: DiscoverOptions = {}):
   };
 }
 
-export function toGrant(tokens: client.TokenEndpointResponse, requested: string[]): TokenGrant {
+function toGrant(tokens: client.TokenEndpointResponse, requested: string[]): TokenGrant {
   if (typeof tokens.access_token !== "string" || !tokens.access_token) {
     throw new AuthError("protocol", "The token response had no access token.");
   }
