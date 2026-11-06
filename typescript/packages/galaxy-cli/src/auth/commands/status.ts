@@ -6,6 +6,23 @@ export interface StatusOptions {
   host?: string;
   json?: boolean;
   showToken?: boolean;
+  /** Aborted on Ctrl-C by the caller (commands don't touch process signals). */
+  signal?: AbortSignal;
+  /** Per host; a slow Galaxy is that host's failure, not the whole command's. */
+  timeoutMs?: number;
+}
+
+const CHECK_TIMEOUT_MS = 10_000;
+const EX_INTERRUPTED = 130;
+
+/** Settle with `p`, or reject as soon as `signal` aborts (the work behind `p` is left to end on its own). */
+function abortable<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 /** `unavailable`: the record is there but its token cannot be read (keyring down, secret gone). */
@@ -58,10 +75,23 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
         checked.push({ login, state: "expired", username: login.username, problem: describeExpiry(login.expiresAt!, now) });
         continue;
       }
+      const timeoutMs = opts.timeoutMs ?? CHECK_TIMEOUT_MS;
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
       try {
-        const who = await deps.whoami(login.baseUrl, login.token);
+        const who = await abortable(deps.whoami(login.baseUrl, login.token, signal), signal);
         checked.push({ login, state: "ok", username: who.username, ...(who.isAdmin !== undefined ? { isAdmin: who.isAdmin } : {}) });
       } catch (e) {
+        if (opts.signal?.aborted) return EX_INTERRUPTED;
+        if (timeout.aborted) {
+          checked.push({
+            login,
+            state: "error",
+            username: login.username,
+            problem: `No answer from ${hostOf(login.baseUrl)} within ${Math.round(timeoutMs / 1000)} s.`,
+          });
+          continue;
+        }
         const invalid = e instanceof AuthError && e.kind === "not_logged_in";
         checked.push({
           login,

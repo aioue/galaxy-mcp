@@ -1,4 +1,5 @@
 import { AuthError } from "./types";
+import { isPlainToken } from "./token-shape";
 
 /** An API key is tens of characters; anything near this is not one. */
 export const MAX_KEY_BYTES = 16 * 1024;
@@ -11,6 +12,15 @@ export class InputCancelled extends Error {
     super("Cancelled.");
     this.name = "InputCancelled";
   }
+}
+
+const NOT_PLAIN = "That is not an API key: it has spaces or characters outside printable ASCII. Paste the key alone.";
+
+/** Refuse a key that cannot be one, without repeating it. Several lines are left to the caller's own message. */
+function checkKeyShape(text: string): string {
+  const key = text.trim();
+  if (key && !/[\r\n]/.test(key) && !isPlainToken(key)) throw new AuthError("usage", NOT_PLAIN);
+  return text;
 }
 
 /** Everything piped on stdin, up to `MAX_KEY_BYTES`; stops reading, rejecting, when `signal` aborts. */
@@ -37,7 +47,11 @@ export function readPiped(stdin: NodeJS.ReadableStream, signal: AbortSignal): Pr
     };
     const onEnd = () => {
       cleanup();
-      resolve(Buffer.concat(chunks).toString("utf8"));
+      try {
+        resolve(checkKeyShape(Buffer.concat(chunks).toString("utf8")));
+      } catch (e) {
+        reject(e);
+      }
     };
     const onError = (e: Error) => settle(() => reject(e));
     const onAbort = () => settle(() => reject(signal.reason));
@@ -62,6 +76,7 @@ export function isRawCapable(stdin: NodeJS.ReadableStream): stdin is RawStdin {
 export function readSecret(stdin: RawStdin, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     let typed = "";
+    const ok = (t: string) => !t.trim() || isPlainToken(t.trim());
     const cleanup = () => {
       stdin.removeListener("data", onData);
       signal.removeEventListener("abort", onAbort);
@@ -78,7 +93,7 @@ export function readSecret(stdin: RawStdin, signal: AbortSignal): Promise<string
       const text = Buffer.from(chunk).toString("utf8").replace(/\x1b\[[0-9;?]*[~A-Za-z]/g, "");
       for (const ch of text) {
         if (ch === "\x03") return settle(() => reject(new InputCancelled()));
-        if (ch === "\r" || ch === "\n" || ch === "\x04") return settle(() => resolve(typed));
+        if (ch === "\r" || ch === "\n" || ch === "\x04") return settle(() => (ok(typed) ? resolve(typed) : reject(new AuthError("usage", NOT_PLAIN))));
         if (ch === "\x7f" || ch === "\b") typed = typed.slice(0, -1);
         else if (ch >= " ") typed += ch;
         if (typed.length > MAX_KEY_BYTES) return settle(() => reject(new AuthError("usage", TOO_LARGE)));

@@ -18,7 +18,9 @@ export function quoteFor(shell: Shell, value: string): string {
       // Inside fish single quotes only \' and \\ are special.
       return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
     case "powershell":
-      return `'${value.replace(/'/g, "''")}'`;
+      // PowerShell also treats the curly quotes U+2018 to U+201B as single quotes
+      // (about_Quoting_Rules), and doubles any of them the same way.
+      return `'${value.replace(/['\u2018-\u201b]/g, (q) => q + q)}'`;
   }
 }
 

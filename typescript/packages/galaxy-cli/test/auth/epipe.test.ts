@@ -10,7 +10,7 @@ describe("exitQuietlyOnEpipe", () => {
   it("exits 0 on EPIPE and rethrows anything else", () => {
     const s = new PassThrough();
     const codes: number[] = [];
-    exitQuietlyOnEpipe([s], (c) => void codes.push(c));
+    exitQuietlyOnEpipe({ stdout: s, stderr: new PassThrough() }, (c) => void codes.push(c));
     s.emit("error", Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
     expect(codes).toEqual([0]);
     expect(() => s.emit("error", Object.assign(new Error("disk"), { code: "EIO" }))).toThrow("disk");

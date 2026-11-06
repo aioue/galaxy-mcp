@@ -6,6 +6,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { execa, type ResultPromise } from "execa";
 import { mkdtemp, mkdir, readFile, rm, stat, symlink } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,14 +14,24 @@ import { startFakeGalaxy, type Approval, type FakeGalaxy } from "../support/fake
 import { startDevice } from "./whoami.helpers";
 
 const tsDir = fileURLToPath(new URL("../../../..", import.meta.url));
-const dist = fileURLToPath(new URL("../../dist/index.js", import.meta.url));
+const pkgDir = fileURLToPath(new URL("../..", import.meta.url));
+const opsDir = join(tsDir, "packages", "galaxy-ops");
+// Built into a private directory inside the package (so `galaxy-ops` still resolves from
+// node_modules), never into `dist`: other test files, and `bin.smoke.int.test.ts`, read that.
+const outDir = join(pkgDir, "node_modules", ".cache", "gxy-e2e");
+const dist = join(outDir, "index.js");
+const env = { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" };
 
 let work: string;
 const bins: Record<string, string> = {};
 
 beforeAll(async () => {
-  // Build once (galaxy-ops first, which the CLI imports at run time).
-  await execa("corepack", ["pnpm", "-r", "build"], { cwd: tsDir, env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" } });
+  // Build only what the binary needs: galaxy-ops (imported at run time; skipped when already
+  // built) and the CLI itself. Not the whole workspace.
+  if (!existsSync(join(opsDir, "dist", "index.js"))) {
+    await execa("corepack", ["pnpm", "--filter", "@galaxyproject/galaxy-ops", "build"], { cwd: tsDir, env });
+  }
+  await execa("corepack", ["pnpm", "exec", "tsup", "--out-dir", outDir], { cwd: pkgDir, env });
   work = await mkdtemp(join(tmpdir(), "gxy-e2e-"));
   for (const name of ["gxy", "galaxy-cli"]) {
     await mkdir(join(work, "bin", name), { recursive: true });
@@ -29,7 +40,10 @@ beforeAll(async () => {
   }
 }, 180_000);
 
-afterAll(() => rm(work, { recursive: true, force: true }));
+afterAll(async () => {
+  await rm(work, { recursive: true, force: true });
+  await rm(outDir, { recursive: true, force: true });
+});
 
 const open: FakeGalaxy[] = [];
 async function galaxyWith(options?: Parameters<typeof startFakeGalaxy>[0]): Promise<FakeGalaxy> {

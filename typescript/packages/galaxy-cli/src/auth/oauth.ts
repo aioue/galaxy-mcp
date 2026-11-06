@@ -2,6 +2,7 @@ import * as client from "openid-client";
 import { isLoopback } from "./base-url";
 import { describeNetworkError, isTlsError } from "./network";
 import { sanitize } from "./sanitize";
+import { isPlainToken } from "./token-shape";
 import { AuthError, CLIENT_ID, type AuthServer, type BaseUrl, type PendingDeviceLogin, type TokenGrant } from "./types";
 
 export interface DiscoverOptions {
@@ -210,9 +211,13 @@ export async function discover(baseUrl: BaseUrl, options: DiscoverOptions = {}):
   };
 }
 
-function toGrant(tokens: client.TokenEndpointResponse, requested: string[]): TokenGrant {
+export function toGrant(tokens: client.TokenEndpointResponse, requested: string[]): TokenGrant {
   if (typeof tokens.access_token !== "string" || !tokens.access_token) {
     throw new AuthError("protocol", "The token response had no access token.");
+  }
+  if (!isPlainToken(tokens.access_token)) {
+    // Never echo it: it is a secret, and it is not a token we can use.
+    throw new AuthError("protocol", "The token response carried an access token with whitespace or non-ASCII characters, so it was not used.");
   }
   // RFC 6749 §5.1: `scope` is omitted when it equals what was requested.
   const scopes = typeof tokens.scope === "string" ? tokens.scope.split(/\s+/).filter(Boolean) : [...requested];

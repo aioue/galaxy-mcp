@@ -9,9 +9,13 @@ import { logoutCommand } from "./commands/logout";
 import { EX_SOFTWARE } from "../exit";
 import { exitQuietlyOnEpipe } from "./epipe";
 
-/** `--scopes a,b` or `--scopes "a b"`. */
-export function parseScopes(value: string): string[] {
-  return value.split(/[,\s]+/).filter(Boolean);
+/**
+ * `--scopes a,b`, `--scopes "a b"` or `--scopes a --scopes b`: every use adds to the list,
+ * in order, without repeats.
+ */
+export function parseScopes(value: string, previous: string[] = []): string[] {
+  const added = value.split(/[,\s]+/).filter(Boolean);
+  return [...new Set([...previous, ...added])];
 }
 
 /**
@@ -63,7 +67,18 @@ export function registerAuth(program: Command, makeDeps: (commandName: string) =
     .addOption(host())
     .option("--json", "print JSON to stdout (always exits 0)")
     .option("--show-token", "do not mask tokens")
-    .action((o) => run((deps) => statusCommand(o, deps)));
+    .action((o) =>
+      run(async (deps) => {
+        const ac = new AbortController();
+        const onSig = () => ac.abort();
+        process.once("SIGINT", onSig);
+        try {
+          return await statusCommand({ ...o, signal: ac.signal }, deps);
+        } finally {
+          process.removeListener("SIGINT", onSig);
+        }
+      }),
+    );
 
   auth
     .command("token")
