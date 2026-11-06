@@ -14,7 +14,8 @@ export function createAuthDeps(commandName: string): AuthDeps {
   const fetchWithUa = withUserAgent();
   return {
     store,
-    discover: (baseUrl) => discover(baseUrl, { clientId: env.GXY_OAUTH_CLIENT_ID || undefined, fetch: fetchWithUa }),
+    discover: (baseUrl, signal) =>
+      discover(baseUrl, { clientId: env.GXY_OAUTH_CLIENT_ID || undefined, fetch: fetchWithUa, signal }),
     whoami: createWhoami(),
     resolveHost: (explicit) => resolveHost({ explicit, env, dotenv: loadSources().dotenv, store, commandName }),
     openBrowser: (url) => openBrowser(url, env),
