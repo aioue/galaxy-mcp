@@ -1,6 +1,7 @@
-import type { AsyncEntry } from "@napi-rs/keyring";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { BaseUrl } from "./types";
-import { trackWedged } from "./wedge";
 
 /**
  * The OS keyring, behind a seam tests can fake. The real backend is `@napi-rs/keyring`
@@ -20,6 +21,10 @@ import { trackWedged } from "./wedge";
  * Availability is detected by use, not by a separate probe: `store.ts` writes the token and
  * reads it back, and falls back to the file if either fails. Every call has a timeout,
  * because a locked or wedged Secret Service can wait forever on a prompt nobody sees.
+ *
+ * The native module runs in a child process per call (`keyring-child.ts`) that is SIGKILLed on
+ * the timeout: its constructor can block forever on a dead D-Bus, which nothing in-process can
+ * interrupt. So a broken bus costs at most the timeout, and never keeps the CLI alive.
  */
 export interface KeyringBackend {
   get(service: string, account: string): Promise<string | null>;
@@ -55,10 +60,15 @@ export function keyringService(baseUrl: BaseUrl): string {
 }
 
 export class KeyringStore {
-  constructor(
-    private readonly backend: KeyringBackend = nativeBackend(),
-    private readonly timeoutMs: number = KEYRING_TIMEOUT_MS,
-  ) {}
+  private readonly backend: KeyringBackend;
+  private readonly timeoutMs: number;
+
+  // No parameter properties: the integration test runs this file as source under Node's type
+  // stripping, which does not support them.
+  constructor(backend?: KeyringBackend, timeoutMs: number = KEYRING_TIMEOUT_MS) {
+    this.timeoutMs = timeoutMs;
+    this.backend = backend ?? nativeBackend({ timeoutMs });
+  }
 
   get(baseUrl: BaseUrl, account: string): Promise<string | null> {
     return this.call("read", () => this.backend.get(keyringService(baseUrl), account));
@@ -92,13 +102,7 @@ export class KeyringStore {
       }, this.timeoutMs);
     });
     try {
-      const work = fn();
-      // Give up waiting, not working: the native call cannot be cancelled and keeps the process
-      // alive until it returns (see wedge.ts), so note it for as long as it is outstanding.
-      void timeout.catch(() => {
-        trackWedged(work);
-      });
-      return await Promise.race([work, timeout]);
+      return await Promise.race([fn(), timeout]);
     } catch (e) {
       if (e instanceof KeyringUnavailableError) throw e;
       throw new KeyringUnavailableError(`The system keyring failed a ${what}: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
@@ -108,30 +112,108 @@ export class KeyringStore {
   }
 }
 
-/** The real backend. The native module is imported lazily so a missing binary is just "unavailable".
- * It is only reached when a record says `keyring` or login probes it: file-stored logins never load it. */
-export function nativeBackend(): KeyringBackend {
-  // One entry per login, built on first use: the constructor talks to the bus, and a write,
-  // its read-back and a delete would otherwise each pay for it.
-  const entries = new Map<string, Promise<AsyncEntry>>();
-  const entry = (service: string, account: string) => {
-    const key = `${service}\0${account}`;
-    let e = entries.get(key);
-    if (!e) {
-      e = import("@napi-rs/keyring").then(({ AsyncEntry }) => new AsyncEntry(service, account, { linux: { store: "secret-service" } }));
-      entries.set(key, e);
-    }
-    return e;
+export interface NativeBackendOptions {
+  /** Kill the child and give up after this long. */
+  timeoutMs?: number;
+  /** The child script; found next to this module by default. Tests point it at a stub. */
+  script?: string;
+  /** Environment for the child; a minimal one built from `process.env` by default. */
+  env?: NodeJS.ProcessEnv;
+}
+
+/** The child lives beside this module: `dist/keyring-child.js` once built, `keyring-child.ts` from source. */
+function childScript(): string {
+  const here = import.meta.url;
+  for (const name of ["keyring-child.js", "keyring-child.ts"]) {
+    const p = fileURLToPath(new URL(name, here));
+    if (existsSync(p)) return p;
+  }
+  return fileURLToPath(new URL("keyring-child.js", here));
+}
+
+/** What the child needs to reach the session bus and the OS, and nothing else: no API keys or tokens. */
+const CHILD_ENV_KEYS = [
+  "HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "LANG", "LC_ALL",
+  "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_DATA_DIRS", "XDG_CURRENT_DESKTOP", "XDG_SESSION_ID",
+  "DISPLAY", "WAYLAND_DISPLAY",
+  // Windows locates the credential store through these.
+  "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SystemRoot", "SYSTEMROOT",
+];
+
+export function childEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const k of CHILD_ENV_KEYS) if (source[k] !== undefined) out[k] = source[k];
+  return out;
+}
+
+type ChildReply =
+  | { ok: true; value: string | boolean | null }
+  | { ok: false; kind: "unavailable" | "not-found" | "failed"; message: string };
+
+/**
+ * The real backend: one child process per call, running the native keyring module. Only reached
+ * when a record says `keyring` or login probes it, so file-stored logins never spawn it.
+ * About 20 ms per call on a healthy keyring; a call that outlives the timeout is SIGKILLed.
+ */
+export function nativeBackend(opts: NativeBackendOptions = {}): KeyringBackend {
+  const timeoutMs = opts.timeoutMs ?? KEYRING_TIMEOUT_MS;
+  const call = (op: "get" | "set" | "delete", service: string, account: string, secret?: string) =>
+    new Promise<ChildReply>((resolve, reject) => {
+      // Not shell, not argv: the secret goes down stdin only.
+      const child = spawn(process.execPath, [opts.script ?? childScript()], {
+        env: opts.env ?? childEnv(),
+        stdio: ["pipe", "pipe", "ignore"],
+        windowsHide: true,
+      });
+      let out = "";
+      let settled = false;
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn();
+      };
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(() => reject(new KeyringUnavailableError(`The system keyring did not answer a ${op} within ${timeoutMs} ms.`)));
+      }, timeoutMs);
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (d: string) => {
+        out += d;
+      });
+      child.on("error", (e) => finish(() => reject(new KeyringUnavailableError(`The keyring helper could not start: ${e.message}`, { cause: e }))));
+      child.on("close", () =>
+        finish(() => {
+          try {
+            const r = JSON.parse(out) as ChildReply;
+            if (typeof r?.ok !== "boolean") throw new Error("shape");
+            resolve(r);
+          } catch {
+            reject(new KeyringUnavailableError(`The keyring helper gave no usable answer to a ${op}.`));
+          }
+        }),
+      );
+      // The child may die before reading; its exit is reported by close, so ignore EPIPE here.
+      child.stdin.on("error", () => {});
+      child.stdin.end(JSON.stringify({ op, service, account, ...(secret === undefined ? {} : { secret }) }));
+    });
+  const value = async (op: "get" | "set" | "delete", service: string, account: string, secret?: string) => {
+    const r = await call(op, service, account, secret);
+    if (r.ok) return r.value;
+    if (r.kind === "not-found") return null;
+    if (r.kind === "unavailable") throw new KeyringUnavailableError(r.message);
+    throw new Error(r.message);
   };
   return {
     async get(service, account) {
-      return (await entry(service, account)).getPassword();
+      const v = await value("get", service, account);
+      return typeof v === "string" ? v : null;
     },
     async set(service, account, secret) {
-      await (await entry(service, account)).setPassword(secret);
+      await value("set", service, account, secret);
     },
     async delete(service, account) {
-      return (await entry(service, account)).deletePassword();
+      return (await value("delete", service, account)) === true;
     },
   };
 }

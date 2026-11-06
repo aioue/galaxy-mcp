@@ -69,7 +69,7 @@ directory (`$GXY_CONFIG_DIR`, else `~/.config/gxy`), readable only by you. A `GA
 | Variable | Does |
 | --- | --- |
 | `GXY_CONFIG_DIR` | Where `hosts.yml` lives (default `~/.config/gxy`; `$XDG_CONFIG_HOME/gxy` when that is set) |
-| `GXY_NO_KEYRING` | `1` never touches the system keyring: tokens go to `hosts.yml`, with a warning. Use it on a box whose keyring hangs or is locked |
+| `GXY_NO_KEYRING` | `1` never touches the system keyring: tokens go to `hosts.yml`, with a warning. Use it on a box whose keyring is broken or locked, to skip the wait |
 
 A login counts as expired a minute before its expiry time, so a token that passes `auth token`
 has time to do its job. If the keyring cannot be read, `auth logout` still removes the stored
@@ -81,9 +81,9 @@ the environment, then in `.env`, then the `--profile` URL, then the only stored 
 token is only sent to the host it was issued for. `auth login` never takes its host from `.env` or a
 profile (a repository must not choose where your key goes): give `--host` or set `GALAXY_URL`.
 
-Troubleshooting: if a command hangs before printing anything on a Linux box with a broken
-Secret Service, set `GXY_NO_KEYRING=1` (the native keyring constructor blocks and cannot be timed
-out yet; moving it to a killable worker thread is a follow-up).
+Troubleshooting: the system keyring is asked through a short-lived helper process that is killed
+if it does not answer within 5 seconds, so a dead D-Bus costs at most that wait before the
+command reports the keyring as unavailable. `GXY_NO_KEYRING=1` skips the keyring entirely.
 
 ### Keeping tokens away from agents
 

@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileStore, type HostRecord } from "../../src/auth/file-store";
 import { KeyringStore } from "../../src/auth/keyring-store";
 import { CombinedStore, createCredentialStore } from "../../src/auth/store";
-import { exitIfKeyringWedged, keyringWedged } from "../../src/auth/wedge";
 import { FakeKeyring, fakeLogin } from "./support";
 
 let root: string;
@@ -96,38 +95,5 @@ describe("FileStore hardening", () => {
     await utimes(other, twoHoursAgo, twoHoursAgo);
     await new FileStore(dir).put(rec());
     expect((await readdir(dir)).sort()).toEqual([".hosts.456.def.tmp", "hosts.yml", "notes.tmp"]);
-  });
-});
-
-describe("a keyring call that outlives its timeout (wedge.ts)", () => {
-  it("is tracked while it is outstanding and forgotten when it returns", async () => {
-    let release!: () => void;
-    const slow = {
-      get: () => new Promise<string | null>((r) => { release = () => r(null); }),
-      set: async () => {},
-      delete: async () => false,
-    };
-    await expect(new KeyringStore(slow, 10).get(baseUrl, "alice")).rejects.toThrow(/did not answer/);
-    expect(keyringWedged()).toBe(true);
-    release();
-    await new Promise((r) => setTimeout(r, 5));
-    expect(keyringWedged()).toBe(false);
-  });
-
-  it("exits only when wedged, and only after both streams drained", async () => {
-    const exit = vi.fn();
-    const calls: (() => void)[] = [];
-    const stream = { write: (_s: string, cb?: () => void) => { calls.push(cb!); } };
-    expect(exitIfKeyringWedged([stream, stream], exit)).toBe(false);
-    expect(exit).not.toHaveBeenCalled();
-
-    const slow = { get: () => new Promise<string | null>(() => {}), set: async () => {}, delete: async () => false };
-    await new KeyringStore(slow, 5).get(baseUrl, "a").catch(() => {});
-    expect(exitIfKeyringWedged([stream, stream], exit)).toBe(true);
-    expect(exit).not.toHaveBeenCalled(); // waiting for the drain
-    calls[0]!();
-    expect(exit).not.toHaveBeenCalled();
-    calls[1]!();
-    expect(exit).toHaveBeenCalledOnce();
   });
 });

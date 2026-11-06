@@ -1,6 +1,6 @@
 import { defineConfig } from "tsup";
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: { index: "src/index.ts", "keyring-child": "src/auth/keyring-child.ts" },
   format: ["esm"],
   dts: false,
   clean: true,
