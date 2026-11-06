@@ -12,16 +12,17 @@ const PROBE_TIMEOUT_MS = 15_000;
  * URL often redirects (http to https, a missing path prefix): sending a key along would hand
  * it to whatever answers. Redirects are never followed; the `Location` is offered as a fix.
  */
-export async function probeGalaxy(baseUrl: BaseUrl, fetchImpl: FetchImpl = globalThis.fetch): Promise<void> {
+export async function probeGalaxy(baseUrl: BaseUrl, fetchImpl: FetchImpl = globalThis.fetch, signal?: AbortSignal): Promise<void> {
   const url = `${baseUrl}/api/version`;
   let res: Response;
   try {
     res = await fetchImpl(url, {
       redirect: "manual",
       headers: { accept: "application/json", "user-agent": USER_AGENT },
-      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(PROBE_TIMEOUT_MS)]) : AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
   } catch (e) {
+    if (signal?.aborted) throw signal.reason ?? e;
     const cause = e instanceof Error && e.cause instanceof Error ? e.cause.message : e instanceof Error ? e.message : String(e);
     throw new AuthError("network", `Could not reach ${baseUrl}: ${cause}.`, { cause: e });
   }
@@ -69,20 +70,23 @@ const NOT_LOGGED_IN =
  */
 export function createWhoami(fetchImpl: FetchImpl = globalThis.fetch) {
   const probed = new Map<string, Promise<void>>();
-  return async function whoami(baseUrl: BaseUrl, token: string): Promise<WhoAmI> {
+  return async function whoami(baseUrl: BaseUrl, token: string, signal?: AbortSignal): Promise<WhoAmI> {
     let probe = probed.get(baseUrl);
     if (!probe) {
+      // The probe is shared, so a cancel of this caller must not poison it for the next:
+      // it runs unsignalled (it has its own timeout) and the caller just stops waiting.
       probe = probeGalaxy(baseUrl, fetchImpl);
       probed.set(baseUrl, probe);
       probe.catch(() => probed.delete(baseUrl));
     }
     await probe;
+    signal?.throwIfAborted();
 
     const ctx = createGalaxyContext({
       baseUrl,
       apiKey: token,
       fetchImpl: (input, init) => {
-        const req = new Request(input, init);
+        const req = new Request(input, signal ? { ...init, signal } : init);
         req.headers.set("user-agent", USER_AGENT);
         return fetchImpl(req);
       },
@@ -91,6 +95,7 @@ export function createWhoami(fetchImpl: FetchImpl = globalThis.fetch) {
     try {
       user = await getUser({}, ctx);
     } catch (e) {
+      if (signal?.aborted) throw signal.reason ?? e;
       throw mapFailure(e, baseUrl);
     }
     const u = user as { id?: unknown; username?: unknown; email?: unknown; is_admin?: unknown };
@@ -106,10 +111,17 @@ export function createWhoami(fetchImpl: FetchImpl = globalThis.fetch) {
 
 function mapFailure(e: unknown, baseUrl: string): AuthError {
   const err = e as { kind?: string; status?: number; http?: { status: number | null } };
-  if (err.kind === "connection") {
-    const status = err.status ?? err.http?.status;
-    if (status == null) return new AuthError("network", `Could not reach ${baseUrl}: ${(e as Error).message}.`, { cause: e });
+  const status = err.status ?? err.http?.status;
+  if (err.kind === "connection" && status == null) {
+    return new AuthError("network", `Could not reach ${baseUrl}: ${(e as Error).message}.`, { cause: e });
+  }
+  if (typeof status === "number") {
     if (status >= 500) return new AuthError("network", `${baseUrl} answered HTTP ${status}.`, { cause: e });
+    // Not a refusal of the token: say what it is, or the person re-creates a good key for nothing.
+    if (status === 429) return new AuthError("network", `${baseUrl} is rate-limiting requests (HTTP 429). Wait a minute and try again.`, { cause: e });
+    if (status === 404) {
+      return new AuthError("protocol", `${baseUrl} answered HTTP 404 for the user lookup, so this URL does not look like a Galaxy API. Check the address, including any path prefix.`, { cause: e });
+    }
   }
   // Auth refusals, redirects, HTML or non-JSON bodies, anything else that is not a user record.
   return new AuthError("not_logged_in", NOT_LOGGED_IN, { cause: e });

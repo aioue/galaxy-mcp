@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
-import { normalizeBaseUrl } from "../base-url";
+import { isLoopback, normalizeBaseUrl } from "../base-url";
+import { InputCancelled, isRawCapable, readPiped, readSecret } from "../stdin";
 import { AuthError, type AuthDeps, type BaseUrl, type StoredLogin, type TokenGrant, type WhoAmI } from "../types";
 import { fail, formatCountdown, formatExpiry, hostOf, sanitize } from "./common";
 
@@ -16,42 +17,45 @@ export interface LoginOptions {
 
 const EX_INTERRUPTED = 130;
 
-/** Lines from stdin, one at a time, without losing what arrives between reads. */
-class LineReader {
-  private queue: string[] = [];
-  private waiters: ((line: string | null) => void)[] = [];
-  private closed = false;
-  private rl: ReturnType<typeof createInterface>;
-
-  constructor(stdin: NodeJS.ReadableStream) {
-    this.rl = createInterface({ input: stdin, terminal: false });
-    this.rl.on("line", (line) => {
-      const w = this.waiters.shift();
-      if (w) w(line);
-      else this.queue.push(line);
-    });
-    this.rl.on("close", () => {
-      this.closed = true;
-      for (const w of this.waiters.splice(0)) w(null);
-    });
-  }
-
-  next(): Promise<string | null> {
-    const queued = this.queue.shift();
-    if (queued !== undefined) return Promise.resolve(queued);
-    if (this.closed) return Promise.resolve(null);
-    return new Promise((resolve) => this.waiters.push(resolve));
-  }
-
-  close(): void {
-    this.rl.close();
-  }
+/** Lines from stdin, one at a time; readline buffers what arrives between reads. */
+function lineReader(stdin: NodeJS.ReadableStream) {
+  const rl = createInterface({ input: stdin, terminal: false });
+  const lines = rl[Symbol.asyncIterator]();
+  return {
+    async next(): Promise<string | null> {
+      const r = await lines.next();
+      return r.done ? null : r.value;
+    },
+    close: () => rl.close(),
+  };
 }
 
-async function readAll(stdin: NodeJS.ReadableStream): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of stdin) chunks.push(Buffer.from(chunk as Uint8Array));
-  return Buffer.concat(chunks).toString("utf8");
+/** Settle with `p`, or reject as soon as `signal` aborts (the work behind `p` is left to finish on its own). */
+function abortable<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    p.catch(() => undefined);
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+/**
+ * Where a person may be sent to approve the code: https (or http to this machine) on the
+ * Galaxy's own origin. The server picks this URL and we print and open it, so a Galaxy
+ * behind a misconfigured proxy must not be able to point people at another host.
+ */
+function isTrustedVerificationUri(uri: string, baseUrl: string): boolean {
+  try {
+    const u = new URL(uri);
+    if (u.origin !== new URL(baseUrl).origin) return false;
+    return u.protocol === "https:" || (u.protocol === "http:" && isLoopback(u.hostname));
+  } catch {
+    return false;
+  }
 }
 
 /** Warnings a person should see before they walk away from a fresh login. */
@@ -71,20 +75,22 @@ function storedMessage(storage: "keyring" | "file", expiresAt: string | null): s
 
 export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<number> {
   const err = (s: string) => deps.io.stderr.write(`${s}\n`);
-  let reader: LineReader | undefined;
+  // One signal for the whole command: every step below either takes it or is raced against it.
+  const signal = opts.signal ?? new AbortController().signal;
+  let reader: ReturnType<typeof lineReader> | undefined;
   try {
     // 1. Which Galaxy.
     let baseUrl: BaseUrl;
     if (opts.host) {
-      baseUrl = await deps.resolveHost(opts.host);
+      baseUrl = await abortable(deps.resolveHost(opts.host), signal);
     } else {
       try {
-        baseUrl = await deps.resolveHost();
+        baseUrl = await abortable(deps.resolveHost(), signal);
       } catch (e) {
         if (!(e instanceof AuthError && e.kind === "usage") || !deps.io.interactive || opts.withToken) throw e;
-        reader = new LineReader(deps.io.stdin);
+        reader = lineReader(deps.io.stdin);
         deps.io.stderr.write("Galaxy URL (for example https://usegalaxy.org): ");
-        const answer = await reader.next();
+        const answer = await abortable(reader.next(), signal);
         if (!answer?.trim()) throw new AuthError("usage", "No Galaxy URL given. Pass --host <url>.");
         baseUrl = normalizeBaseUrl(answer);
       }
@@ -95,12 +101,20 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       err("! GALAXY_API_KEY is set and will take precedence over the login stored now. Unset it to use the stored login.");
     }
 
-    // 2a. A key pasted on stdin.
+    // 2a. A key pasted on stdin, or typed at a terminal.
     if (opts.withToken) {
-      const raw = (await readAll(deps.io.stdin)).trim();
+      let typed: string;
+      if (deps.io.interactive && isRawCapable(deps.io.stdin)) {
+        deps.io.stderr.write("Paste your Galaxy API key: ");
+        typed = await readSecret(deps.io.stdin, signal);
+        deps.io.stderr.write("\n");
+      } else {
+        typed = await readPiped(deps.io.stdin, signal);
+      }
+      const raw = typed.trim();
       if (!raw) throw new AuthError("usage", "No API key on stdin. Pipe it in: printf %s \"$KEY\" | " + `${deps.commandName} auth login --host ${baseUrl} --with-token`);
       if (/[\r\n]/.test(raw)) throw new AuthError("usage", "Expected a single-line API key on stdin, got several lines.");
-      const who = await deps.whoami(baseUrl, raw);
+      const who = await abortable(deps.whoami(baseUrl, raw, signal), signal);
       const login: StoredLogin = {
         baseUrl,
         username: who.username,
@@ -111,6 +125,8 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
         expiresAt: null,
         obtainedAt: deps.now().toISOString(),
       };
+      // The write is atomic and short, so it is not interrupted; this is the last point to cancel.
+      signal.throwIfAborted();
       // An admin's token is never written to the plaintext file unless asked for by flag.
       const put = await deps.store.put(login, { insecureStorage: opts.insecureStorage, ...(who.isAdmin ? { requireKeyring: true } : {}) });
       if (put.warning) err(`! ${put.warning}`);
@@ -121,7 +137,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     }
 
     // 2b. The device flow.
-    const server = await deps.discover(baseUrl);
+    const server = await abortable(deps.discover(baseUrl, signal), signal);
     if (!server.supportsDeviceFlow) {
       throw new AuthError(
         "unsupported",
@@ -129,7 +145,18 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       );
     }
     const scopes = opts.scopes ?? [];
-    const pending = await server.startDeviceLogin(scopes.length ? scopes : undefined);
+    // A cancel during discovery must not create a code on the server.
+    signal.throwIfAborted();
+    const pending = await abortable(server.startDeviceLogin(scopes.length ? scopes : undefined), signal);
+
+    if (!isTrustedVerificationUri(pending.verificationUri, baseUrl)) {
+      throw new AuthError(
+        "protocol",
+        `${host} asked for the code to be entered at ${sanitize(pending.verificationUri)}, which is not an https page on ${host}. ` +
+          "That could send you to another site, so the login was stopped. Paste an API key instead: " +
+          `${deps.commandName} auth login --host ${baseUrl} --with-token`,
+      );
+    }
 
     err(`Requesting access to ${host}`);
     err(`  Scopes  ${scopes.length ? sanitize(scopes.join(" ")) : "server default"}`);
@@ -139,38 +166,22 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     err(`  Enter it at ${sanitize(pending.verificationUri)}`);
 
     const canOpen = opts.browser !== false && deps.io.interactive && (deps.canOpenBrowser?.() ?? true);
-    const ac = new AbortController();
-    const abort = () => ac.abort();
-    opts.signal?.addEventListener("abort", abort, { once: true });
-    if (opts.signal?.aborted) ac.abort();
-
-    let grant: TokenGrant;
-    try {
-      if (canOpen) {
-        err("Press Enter to open that page in your browser…");
-        reader ??= new LineReader(deps.io.stdin);
-        const r = reader;
-        // Polling starts at once: approving on another device must not wait for Enter.
-        void r.next().then(async (line) => {
-          if (line === null || ac.signal.aborted) return;
-          if (!(await deps.openBrowser(pending.verificationUri))) err("Could not open a browser. Open the page yourself.");
-        });
-      }
-      err(`Waiting for approval (code expires in ${formatCountdown(pending.expiresAt.getTime() - deps.now().getTime())})…`);
-      grant = await pending.waitForApproval(ac.signal);
-    } catch (e) {
-      if (ac.signal.aborted) {
-        err("Cancelled.");
-        return EX_INTERRUPTED;
-      }
-      throw e;
-    } finally {
-      opts.signal?.removeEventListener("abort", abort);
+    if (canOpen) {
+      err("Press Enter to open that page in your browser…");
+      reader ??= lineReader(deps.io.stdin);
+      // Polling starts at once: approving on another device must not wait for Enter.
+      void reader.next().then(async (line) => {
+        if (line === null || signal.aborted) return;
+        if (!(await deps.openBrowser(pending.verificationUri))) err("Could not open a browser. Open the page yourself.");
+      });
     }
+    err(`Waiting for approval (code expires in ${formatCountdown(pending.expiresAt.getTime() - deps.now().getTime())})…`);
+    const grant: TokenGrant = await pending.waitForApproval(signal);
 
-    const who = await deps.whoami(baseUrl, grant.accessToken);
+    const who = await abortable(deps.whoami(baseUrl, grant.accessToken, signal), signal);
     const now = deps.now();
     const expiresAt = grant.expiresIn !== undefined ? new Date(now.getTime() + grant.expiresIn * 1000).toISOString() : null;
+    signal.throwIfAborted();
     const put = await deps.store.put(
       {
         baseUrl,
@@ -190,6 +201,10 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     for (const w of tokenWarnings(host, who, expiresAt)) err(w);
     return 0;
   } catch (e) {
+    if (signal.aborted || e instanceof InputCancelled) {
+      err("Cancelled.");
+      return EX_INTERRUPTED;
+    }
     return fail(deps, e);
   } finally {
     reader?.close();
