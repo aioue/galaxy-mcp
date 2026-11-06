@@ -21,6 +21,7 @@ describe("login (device flow)", () => {
     expect(h.cap.err).toContain("Logged in to dev.galaxy.example.org as aioue");
     expect(h.cap.err).toMatch(/stored in the system keyring/);
     expect(h.server.startedWith).toEqual([["histories:read", "tools:run"]]);
+    expect(h.server.revoked).toEqual([]); // a good login keeps its token
     expect(h.store.putCalls[0]!.login).toMatchObject({
       baseUrl: HOST,
       username: "aioue",
@@ -119,6 +120,27 @@ describe("login (device flow)", () => {
       expect(h.cap.err + h.cap.out).not.toContain(FAKE_TOKEN);
     });
 
+    it("revokes the token when whoami fails unexpectedly", async () => {
+      const h = harness();
+      h.deps.whoami = async () => {
+        throw new Error("whoami exploded");
+      };
+      expect(await loginCommand({ host: HOST_ARG }, h.deps)).not.toBe(0);
+      expect(h.server.revoked).toEqual([FAKE_TOKEN]);
+      expect(h.cap.err).toContain("so it was revoked");
+      expect(h.store.putCalls).toEqual([]);
+    });
+
+    it("revokes the token of an admin who is refused for lack of a keyring, without echoing it", async () => {
+      const h = harness();
+      h.store.keyringAvailable = false;
+      h.knobs.whoami = { username: "root", isAdmin: true };
+      expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(77);
+      expect(h.server.revoked).toEqual([FAKE_TOKEN]);
+      expect(h.cap.err).toContain("so it was revoked");
+      expect(h.cap.err + h.cap.out).not.toContain(FAKE_TOKEN);
+    });
+
     it("says to revoke it by hand when that revocation fails too", async () => {
       const h = harness();
       h.store.putError = new Error("disk full");
@@ -139,6 +161,28 @@ describe("login (device flow)", () => {
   });
 
   describe("naming the Galaxy", () => {
+    it("shows the host before a pasted key is read or sent", async () => {
+      const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
+      const seen: string[] = [];
+      h.deps.whoami = async () => {
+        seen.push(h.cap.err);
+        return { username: "aioue" };
+      };
+      await loginCommand({ host: HOST, withToken: true }, h.deps);
+      expect(seen[0]).toContain("Logging in to dev.galaxy.example.org");
+    });
+
+    it("shows the host before the device flow starts", async () => {
+      const h = harness();
+      const seen: string[] = [];
+      h.deps.discover = async () => {
+        seen.push(h.cap.err);
+        return h.server;
+      };
+      await loginCommand({ host: HOST }, h.deps);
+      expect(seen[0]).toContain("Logging in to dev.galaxy.example.org");
+    });
+
     it("is a usage error without a host when not interactive", async () => {
       const h = harness();
       expect(await loginCommand({}, h.deps)).toBe(64);

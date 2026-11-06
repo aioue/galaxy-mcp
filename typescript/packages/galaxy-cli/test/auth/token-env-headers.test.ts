@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import { tokenCommand } from "../../src/auth/commands/token";
 import { envCommand, quoteFor } from "../../src/auth/commands/env";
 import { headersCommand } from "../../src/auth/commands/headers";
-import { FAKE_TOKEN, HOST, OTHER, fakeLogin, harness } from "./harness";
+import { DAY, FAKE_TOKEN, HOST, OTHER, fakeLogin, harness } from "./harness";
 
 type H = ReturnType<typeof harness>;
 const commands: [string, (h: H) => Promise<number>][] = [
@@ -63,6 +63,27 @@ describe.each(commands)("%s when there is nothing to hand out", (_name, run) => 
     expect(h.cap.err).toContain(`gxy auth login --host ${HOST}`);
   });
 
+  it("exits 77 with how to log in when nothing is stored and nothing names a host", async () => {
+    const h = harness();
+    expect(await run(h)).toBe(77);
+    expect(h.cap.out).toBe("");
+    expect(h.cap.err).toContain("Not logged in; run gxy auth login --host <url>");
+  });
+
+  it("exits 77, as about to expire, for a login with under a minute left", async () => {
+    const h = harness({ stored: [fakeLogin({ expiresAt: new Date(new Date(DAY).getTime() + 30_000).toISOString() })] });
+    expect(await run(h)).toBe(77);
+    expect(h.cap.out).toBe("");
+    expect(h.cap.err).toMatch(/about to expire/);
+  });
+
+  it("exits 77 and says the expiry is unreadable, rather than treating it as none", async () => {
+    const h = harness({ stored: [fakeLogin({ expiresAt: "tomorrow" })] });
+    expect(await run(h)).toBe(77);
+    expect(h.cap.out).toBe("");
+    expect(h.cap.err).toMatch(/unreadable expiry time \(tomorrow\)/);
+  });
+
   it("exits 77 and names the expiry when the login has expired", async () => {
     const h = harness({ stored: [fakeLogin({ expiresAt: "2026-11-06T09:00:00.000Z" })] });
     expect(await run(h)).toBe(77);
@@ -70,6 +91,19 @@ describe.each(commands)("%s when there is nothing to hand out", (_name, run) => 
     expect(h.cap.err).toContain("expired at 2026-11-06 09:00 UTC");
     expect(h.cap.err).toContain(`gxy auth login --host ${HOST}`);
     expect(h.cap.err).not.toContain(FAKE_TOKEN);
+  });
+});
+
+describe("choosing the host", () => {
+  it("exits 64, not 77, when several logins are stored and none is named", async () => {
+    const h = harness({ stored: [fakeLogin(), fakeLogin({ baseUrl: OTHER })] });
+    expect(await tokenCommand({}, h.deps)).toBe(64);
+    expect(h.cap.out).toBe("");
+  });
+
+  it("exits 76, not 77, for an insecure --host", async () => {
+    const h = harness();
+    expect(await tokenCommand({ host: "http://remote.example" }, h.deps)).toBe(76);
   });
 });
 

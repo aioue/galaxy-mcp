@@ -1,14 +1,12 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { childEnv, KeyringStore, KeyringUnavailableError, nativeBackend } from "../../src/auth/keyring-store";
-import { FakeKeyring, fakeLogin } from "./support";
-
-const { baseUrl } = fakeLogin();
+import { HOST as baseUrl, FakeKeyring, useTempDir } from "./harness";
 
 describe("KeyringStore", () => {
   it("keys entries by gxy:<baseUrl> and username", async () => {
@@ -46,11 +44,9 @@ describe("KeyringStore.delete is verified", () => {
 
 // The real backend against stub children: the protocol, the kill on timeout, and what the child is given.
 describe("nativeBackend (stub child)", () => {
-  let dir: string;
-  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), "gxy-kc-")); });
-  afterEach(() => rm(dir, { recursive: true, force: true }));
+  const tmp = useTempDir("gxy-kc-");
   const stub = async (body: string) => {
-    const p = join(dir, "stub.mjs");
+    const p = join(tmp.path, "stub.mjs");
     await writeFile(p, body);
     return p;
   };
@@ -68,7 +64,7 @@ describe("nativeBackend (stub child)", () => {
   });
 
   it("keeps the secret out of the child's argv and environment, and passes no GALAXY_* variables", async () => {
-    const log = join(dir, "log.json");
+    const log = join(tmp.path, "log.json");
     const script = await stub(`
       import { writeFileSync } from "node:fs";
       let s = ""; for await (const c of process.stdin) s += c;
@@ -96,7 +92,7 @@ describe("nativeBackend (stub child)", () => {
   });
 
   it("kills a child that never answers and reports that the keyring did not answer", async () => {
-    const pidFile = join(dir, "pid");
+    const pidFile = join(tmp.path, "pid");
     const script = await stub(`
       import { writeFileSync } from "node:fs";
       writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
@@ -105,8 +101,8 @@ describe("nativeBackend (stub child)", () => {
     await expect(new KeyringStore(nativeBackend({ script, env, timeoutMs: 300 }), 300).get(baseUrl, "alice")).rejects.toThrow(/did not answer/);
     expect(Date.now() - t0).toBeLessThan(2000);
     const pid = Number(await readFile(pidFile, "utf8"));
-    await new Promise((r) => setTimeout(r, 100));
-    expect(() => process.kill(pid, 0)).toThrow(); // gone
+    // SIGKILL is delivered at once but the process takes a moment to be reaped.
+    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow());
   });
 
   it("maps garbage, silence and a crash to unavailable", async () => {
@@ -126,7 +122,57 @@ describe("nativeBackend (stub child)", () => {
   });
 
   it("reports a child that cannot start", async () => {
-    await expect(new KeyringStore(nativeBackend({ script: join(dir, "missing.mjs"), env, timeoutMs: 5000 }), 5000).get(baseUrl, "a")).rejects.toThrow(KeyringUnavailableError);
+    await expect(new KeyringStore(nativeBackend({ script: join(tmp.path, "missing.mjs"), env, timeoutMs: 5000 }), 5000).get(baseUrl, "a")).rejects.toThrow(KeyringUnavailableError);
+  });
+});
+
+// The real child script, with `@napi-rs/keyring` replaced by a stub module next to a copy of it: what
+// the child asks the native module for, without any chance of reaching a real keyring.
+describe("keyring-child (stub native module)", () => {
+  const tmp = useTempDir("gxy-kn-");
+  const childSource = join(__dirname, "../../src/auth/keyring-child.ts");
+
+  /** A copy of the child in a temp dir; `stubModule` is the body of the fake `@napi-rs/keyring`, or undefined for none. */
+  async function childWith(stubModule: string | undefined) {
+    const script = join(tmp.path, "keyring-child.ts");
+    await writeFile(script, await readFile(childSource, "utf8"));
+    await writeFile(join(tmp.path, "package.json"), '{"type":"module"}');
+    if (stubModule !== undefined) {
+      const mod = join(tmp.path, "node_modules", "@napi-rs", "keyring");
+      await mkdir(mod, { recursive: true });
+      await writeFile(join(mod, "package.json"), '{"name":"@napi-rs/keyring","type":"module","main":"index.js"}');
+      await writeFile(join(mod, "index.js"), stubModule);
+    }
+    return nativeBackend({ script, env: { PATH: process.env.PATH, STUB_LOG: join(tmp.path, "calls.log") }, timeoutMs: 10_000 });
+  }
+  const recording = `
+    import { appendFileSync } from "node:fs";
+    export class AsyncEntry {
+      constructor(service, account, options) { this.args = { service, account, options }; }
+      note(op) { appendFileSync(process.env.STUB_LOG, JSON.stringify({ op, ...this.args }) + "\\n"); }
+      async getPassword() { this.note("get"); return null; }
+      async setPassword() { this.note("set"); }
+      async deletePassword() { this.note("delete"); return true; }
+    }`;
+
+  it("pins every entry to the Secret Service, never the kernel keyutils keyring", async () => {
+    const b = await childWith(recording);
+    await b.get("svc", "acct");
+    await b.set("svc", "acct", "FAKE");
+    await b.delete("svc", "acct");
+    const calls = (await readFile(join(tmp.path, "calls.log"), "utf8")).trim().split("\n").map((l) => JSON.parse(l) as { op: string; service: string; account: string; options: unknown });
+    expect(calls.map((c) => c.op)).toEqual(["get", "set", "delete"]);
+    for (const c of calls) expect(c).toMatchObject({ service: "svc", account: "acct", options: { linux: { store: "secret-service" } } });
+  });
+
+  it("reports an unavailable keyring when the entry cannot be constructed", async () => {
+    const b = await childWith(`export class AsyncEntry { constructor() { throw new Error("no bus"); } }`);
+    await expect(new KeyringStore(b, 10_000).get(baseUrl, "a")).rejects.toThrow(/no bus/);
+  });
+
+  it("reports an unavailable keyring when the native module cannot be loaded", async () => {
+    const b = await childWith(undefined);
+    await expect(new KeyringStore(b, 10_000).get(baseUrl, "a")).rejects.toThrow(/could not be loaded/);
   });
 });
 
@@ -153,7 +199,7 @@ describe.skipIf(process.platform !== "linux")("real child against a bus that nev
       const t0 = Date.now();
       const out = await new Promise<{ code: number | null; stdout: string }>((resolve, reject) => {
         const c = spawn(process.execPath, [runner], {
-          env: { PATH: process.env.PATH, HOME: process.env.HOME, DBUS_SESSION_BUS_ADDRESS: `unix:path=${sock}` },
+          env: { PATH: process.env.PATH, HOME: dir, DBUS_SESSION_BUS_ADDRESS: `unix:path=${sock}` },
           stdio: ["ignore", "pipe", "inherit"],
         });
         let stdout = "";

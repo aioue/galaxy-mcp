@@ -86,6 +86,7 @@ describe("auth, end to end", () => {
   const cliEnv = (extra: Record<string, string> = {}) => ({ PATH: process.env.PATH ?? "", HOME: work!, GXY_CONFIG_DIR: configDir, GXY_NO_KEYRING: "1", ...extra });
 
   const run = (args: string[], opts: { env?: Record<string, string>; input?: string; name?: Name } = {}) =>
+    // Typed as text output: `input` and `stdin` below are both conditional, which widens execa's result.
     execa(process.execPath, [bins[opts.name ?? "gxy"]!, ...args], {
       cwd: work,
       extendEnv: false,
@@ -94,7 +95,7 @@ describe("auth, end to end", () => {
       stdin: opts.input === undefined ? "ignore" : undefined,
       reject: false,
       timeout: 60_000,
-    });
+    }) as unknown as ResultPromise<{ reject: false }>;
 
   /**
    * Start a device login, approve its code on the fake while the CLI polls, and wait for it.
@@ -102,7 +103,7 @@ describe("auth, end to end", () => {
    */
   async function deviceLogin(g: FakeGalaxy, approval: Approval | "expire" = {}, opts: { env?: Record<string, string> } = {}) {
     const before = new Set(g.pendingCodes());
-    const child = run(["auth", "login", "--host", g.baseUrl], opts) as ResultPromise;
+    const child = run(["auth", "login", "--host", g.baseUrl], opts);
     try {
       let code: string | undefined;
       await vi.waitFor(

@@ -1,36 +1,114 @@
 import { describe, expect, it } from "vitest";
-import { resolveHost } from "../../src/auth/host";
-import { AuthError, type LoginSummary } from "../../src/auth/types";
-import { fakeLogin } from "./support";
+import { normalizeBaseUrl } from "../../src/auth/base-url";
+import { pickHost, resolveHost } from "../../src/auth/host";
+import { loadSourcesAsync, resolveConnection, type Sources } from "../../src/config";
+import { FakeStore, fakeLogin } from "./harness";
 
-const summary = (url: string): LoginSummary => {
-  const { token: _t, ...rest } = fakeLogin({ baseUrl: url as never });
-  return { ...rest, storage: "file" };
+const A = normalizeBaseUrl("https://a.example");
+const B = normalizeBaseUrl("https://b.example");
+const storeOf = (...urls: string[]) => {
+  const s = new FakeStore();
+  for (const u of urls) s.seed(fakeLogin({ baseUrl: normalizeBaseUrl(u) }));
+  return s;
 };
-const storeOf = (...urls: string[]) => ({ list: async () => urls.map(summary) });
-const base = { env: {}, dotenv: {} };
+const stored = (...urls: string[]) => urls.map((u) => normalizeBaseUrl(u));
+const empty = { env: {}, dotenv: {}, storedBaseUrls: [] as never[] };
 
-describe("resolveHost", () => {
-  it("prefers --host, then env, then .env, normalised", async () => {
-    const store = storeOf("https://stored.example");
-    expect(await resolveHost({ ...base, explicit: "Flag.example/", env: { GALAXY_URL: "https://env.example" }, store })).toBe("https://flag.example");
-    expect(await resolveHost({ ...base, env: { GALAXY_URL: "https://env.example" }, dotenv: { GALAXY_URL: "https://dot.example" }, store })).toBe("https://env.example");
-    expect(await resolveHost({ ...base, dotenv: { GALAXY_URL: "https://dot.example" }, store })).toBe("https://dot.example");
+describe("pickHost: one precedence", () => {
+  const all = {
+    flag: "https://flag.example",
+    env: { GALAXY_URL: "https://env.example" },
+    dotenv: { GALAXY_URL: "https://dot.example" },
+    profileUrl: "https://prof.example",
+    storedBaseUrls: stored("https://stored.example"),
+  };
+  it("takes flag, then env, then .env, then the profile, then the only stored login", () => {
+    expect(pickHost(all)).toEqual({ url: "https://flag.example", source: "flag" });
+    expect(pickHost({ ...all, flag: undefined }).source).toBe("env");
+    expect(pickHost({ ...all, flag: undefined, env: {} }).source).toBe("dotenv");
+    expect(pickHost({ ...all, flag: undefined, env: {}, dotenv: {} }).source).toBe("profile");
+    expect(pickHost({ ...all, flag: undefined, env: {}, dotenv: {}, profileUrl: undefined })).toEqual({
+      url: "https://stored.example",
+      source: "stored",
+    });
   });
-  it("uses the only stored login", async () => {
-    expect(await resolveHost({ ...base, store: storeOf("https://stored.example") })).toBe("https://stored.example");
+
+  it("is ambiguous with several stored logins and none named, and a usage error with none", () => {
+    const e = (() => {
+      try {
+        pickHost({ ...empty, storedBaseUrls: stored("https://a.example", "https://b.example") });
+      } catch (x) {
+        return x as Error;
+      }
+    })();
+    expect(e).toMatchObject({ kind: "ambiguous_host" });
+    expect(e?.message).toContain("https://a.example");
+    expect(e?.message).toContain("https://b.example");
+    expect(() => pickHost(empty)).toThrow(expect.objectContaining({ kind: "usage" }));
   });
-  it("fails with ambiguous_host listing several", async () => {
-    const err = await resolveHost({ ...base, store: storeOf("https://a.example", "https://b.example") }).catch((e) => e);
-    expect(err).toBeInstanceOf(AuthError);
-    expect(err.kind).toBe("ambiguous_host");
-    expect(err.message).toContain("https://a.example");
-    expect(err.message).toContain("https://b.example");
+
+  it("for login, ignores .env and the profile but still takes the flag and the environment", () => {
+    const l = { ...all, flag: undefined, env: {}, forLogin: true };
+    expect(pickHost(l).source).toBe("stored");
+    expect(() => pickHost({ ...l, storedBaseUrls: [] })).toThrow(expect.objectContaining({ kind: "usage" }));
+    expect(pickHost({ ...l, env: { GALAXY_URL: "https://env.example" } }).source).toBe("env");
+    expect(pickHost({ ...l, flag: "https://flag.example" }).source).toBe("flag");
   });
-  it("fails with usage when nothing is stored", async () => {
-    await expect(resolveHost({ ...base, store: storeOf() })).rejects.toMatchObject({ kind: "usage" });
+});
+
+describe("resolveHost (gxy auth *)", () => {
+  it("normalises whatever won", async () => {
+    expect(await resolveHost({ explicit: "Flag.example/", env: {}, dotenv: {}, store: storeOf() })).toBe("https://flag.example");
   });
-  it("rejects insecure http", async () => {
-    await expect(resolveHost({ ...base, explicit: "http://remote.example", store: storeOf() })).rejects.toMatchObject({ kind: "insecure" });
+
+  it("uses the profile URL, and the global --url as the flag", async () => {
+    expect(await resolveHost({ env: {}, dotenv: {}, profileUrl: "https://prof.example", store: storeOf("https://s.example") })).toBe("https://prof.example");
+    expect(await resolveHost({ explicit: "Flag.example", env: {}, dotenv: {}, profileUrl: "https://prof.example", store: storeOf() })).toBe("https://flag.example");
   });
+
+  it("uses the only stored login, and fails when there are several or none", async () => {
+    expect(await resolveHost({ env: {}, dotenv: {}, store: storeOf("https://s.example") })).toBe("https://s.example");
+    await expect(resolveHost({ env: {}, dotenv: {}, store: storeOf("https://a.example", "https://b.example") })).rejects.toMatchObject({ kind: "ambiguous_host" });
+    await expect(resolveHost({ env: {}, dotenv: {}, store: storeOf() })).rejects.toMatchObject({ kind: "usage" });
+  });
+
+  it("refuses an insecure http host", async () => {
+    await expect(resolveHost({ explicit: "http://remote.example", env: {}, dotenv: {}, store: storeOf() })).rejects.toMatchObject({ kind: "insecure" });
+  });
+
+  it("for login, never takes the host from .env or the profile", async () => {
+    const input = { env: {}, dotenv: { GALAXY_URL: "https://evil.example" }, profileUrl: "https://evil.example", forLogin: true };
+    await expect(resolveHost({ ...input, store: storeOf() })).rejects.toMatchObject({ kind: "usage" });
+    expect(await resolveHost({ ...input, store: storeOf("https://s.example") })).toBe("https://s.example");
+    expect(await resolveHost({ ...input, env: { GALAXY_URL: "https://env.example" }, store: storeOf() })).toBe("https://env.example");
+  });
+
+  it("does not list the store when something names the host", async () => {
+    const store = storeOf("https://s.example");
+    store.list = async () => {
+      throw new Error("the store should not be read");
+    };
+    expect(await resolveHost({ explicit: "https://flag.example", env: {}, dotenv: {}, store })).toBe("https://flag.example");
+  });
+});
+
+describe("operations and auth pick the same Galaxy", () => {
+  const cases: Record<string, { flags: { url?: string; profile?: string }; env?: Record<string, string>; dotenv?: Record<string, string> }> = {
+    flag: { flags: { url: B } },
+    env: { flags: {}, env: { GALAXY_URL: B } },
+    dotenv: { flags: {}, dotenv: { GALAXY_URL: B } },
+    profile: { flags: { profile: "p" } },
+    stored: { flags: {} },
+  };
+  for (const [name, c] of Object.entries(cases)) {
+    it(`agree on the ${name} step`, async () => {
+      const store = storeOf(A);
+      const profiles = { p: { galaxy_url: B, galaxy_user_key: "K" } };
+      const base: Sources = { env: c.env ?? {}, dotenv: { GALAXY_API_KEY: "K", ...c.dotenv }, profiles, now: new Date("2026-06-01") };
+      const src = await loadSourcesAsync(c.flags, { store, base, now: base.now });
+      const op = resolveConnection(c.flags, src).baseUrl;
+      const auth = await resolveHost({ explicit: c.flags.url, env: base.env, dotenv: base.dotenv, profileUrl: c.flags.profile ? B : undefined, store });
+      expect(normalizeBaseUrl(op)).toBe(auth);
+    });
+  }
 });

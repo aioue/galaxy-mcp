@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { statusCommand } from "../../src/auth/commands/status";
 import { createWhoami } from "../../src/auth/whoami";
 import { AuthError } from "../../src/auth/types";
-import { FAKE_TOKEN, HOST, OTHER, fakeLogin, harness } from "./harness";
+import { FAKE_TOKEN, HOST, OTHER, fakeLogin, harness, makeTokenUnreadable } from "./harness";
 
 const expiredLogin = () => fakeLogin({ expiresAt: "2026-11-06T09:00:00.000Z" });
 const twoLogins = () => harness({ stored: [fakeLogin(), fakeLogin({ baseUrl: OTHER, username: "bob" })] });
@@ -174,5 +174,44 @@ describe("auth status", () => {
       expect(await statusCommand({ json: true, host: OTHER }, named.deps)).toBe(0);
       expect(JSON.parse(named.cap.out)).toEqual([]);
     });
+  });
+
+  describe("when a token cannot be read", () => {
+    it.each(["throw", "null"] as const)("reports that host, still checks the others, and exits 1 (%s)", async (how) => {
+      const h = twoLogins();
+      makeTokenUnreadable(h, [HOST], how);
+      expect(await statusCommand({}, h.deps)).toBe(1);
+      expect(h.cap.err).toContain("dev.galaxy.example.org");
+      expect(h.cap.err).toContain("token unavailable:");
+      expect(h.cap.err).toContain("other.example.org");
+      expect(h.cap.err).toContain("Logged in as"); // the other host was still checked
+      expect(h.whoamiCalls.map((c) => c.baseUrl)).toEqual([OTHER]);
+    });
+
+    it("gives it a status value in --json, without a token, and exits 0 like any other --json run", async () => {
+      const h = twoLogins();
+      makeTokenUnreadable(h, [HOST]);
+      expect(await statusCommand({ json: true, showToken: true }, h.deps)).toBe(0);
+      const out = JSON.parse(h.cap.out) as { base_url: string; status: string; error?: string; token?: string }[];
+      expect(out.map((o) => [o.base_url, o.status])).toEqual([[HOST, "unavailable"], [OTHER, "ok"]]);
+      expect(out[0]!.error).toContain("token unavailable:");
+      expect(out[0]!.token).toBeUndefined();
+      expect(out[1]!.token).toBe(FAKE_TOKEN);
+    });
+
+    it("does the same with --host", async () => {
+      const h = twoLogins();
+      makeTokenUnreadable(h, [HOST]);
+      expect(await statusCommand({ host: HOST }, h.deps)).toBe(1);
+      expect(h.cap.err).toContain("token unavailable:");
+    });
+  });
+
+  it("says an unreadable expiry is unreadable, rather than printing NaN, and makes no live check", async () => {
+    const h = harness({ stored: [fakeLogin({ expiresAt: "tomorrow" })] });
+    expect(await statusCommand({}, h.deps)).toBe(1);
+    expect(h.cap.err).toContain("unreadable expiry");
+    expect(h.cap.err).not.toContain("NaN");
+    expect(h.whoamiCalls).toEqual([]);
   });
 });

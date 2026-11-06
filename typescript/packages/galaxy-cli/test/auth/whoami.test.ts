@@ -20,7 +20,7 @@ const tlsFailure = (async () => {
   throw certificateError();
 }) as unknown as typeof fetch;
 /** The same, except that it answers the version probe, so the failure comes at the user lookup. */
-const tlsFailureAfterProbe = (async (input: RequestInfo | URL) => {
+const tlsFailureAfterProbe = (async (input: Request | string | URL) => {
   if (String(input instanceof Request ? input.url : input).endsWith("/api/version")) return Response.json({ version_major: "26.1" });
   throw certificateError();
 }) as typeof fetch;

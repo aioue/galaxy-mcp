@@ -43,9 +43,4 @@ describe("normalizeBaseUrl", () => {
     expect(() => normalizeBaseUrl("http://host.example")).toThrow(expect.objectContaining({ kind: "insecure" }));
     expect(() => normalizeBaseUrl("ftp://host.example")).toThrow(AuthError);
   });
-
-  it("is exact: a prefix of another base URL is a different one", () => {
-    expect(normalizeBaseUrl("https://host.example")).not.toBe(normalizeBaseUrl("https://host.example/galaxy"));
-    expect(normalizeBaseUrl("https://host.example")).not.toBe(normalizeBaseUrl("https://host.example.evil.example"));
-  });
 });

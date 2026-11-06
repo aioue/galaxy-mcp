@@ -1,6 +1,13 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { afterEach, beforeEach } from "vitest";
 import { normalizeBaseUrl } from "../../src/auth/base-url";
+import { FileStore } from "../../src/auth/file-store";
 import { resolveHost } from "../../src/auth/host";
+import { KeyringStore, type KeyringBackend } from "../../src/auth/keyring-store";
+import { CombinedStore } from "../../src/auth/store";
 import {
   AuthError,
   type AuthDeps,
@@ -76,6 +83,58 @@ export class FakeStore implements CredentialStore {
       .sort((a, b) => a.baseUrl.localeCompare(b.baseUrl))
       .map(({ token: _t, ...rest }) => rest);
   }
+}
+
+/**
+ * An in-memory keyring, so no test reaches the real one. `mode` is how it misbehaves:
+ * `throw` and `hang` for a backend that is down or wedged, `lossy` for one that accepts a write
+ * and serves nothing, `wrong` for one that serves something other than what was written, and
+ * `undeletable` for one that reports a delete that did not happen.
+ */
+export class FakeKeyring implements KeyringBackend {
+  data = new Map<string, string>();
+  mode: "ok" | "throw" | "hang" | "lossy" | "wrong" | "undeletable" = "ok";
+  private gate() {
+    if (this.mode === "throw") return Promise.reject(new Error("no secret service"));
+    if (this.mode === "hang") return new Promise<never>(() => {});
+    return undefined;
+  }
+  async get(service: string, account: string) {
+    await this.gate();
+    const v = this.data.get(`${service}|${account}`) ?? null;
+    return this.mode === "wrong" && v !== null ? "something-else" : v;
+  }
+  async set(service: string, account: string, secret: string) {
+    await this.gate();
+    if (this.mode !== "lossy") this.data.set(`${service}|${account}`, secret);
+  }
+  async delete(service: string, account: string) {
+    await this.gate();
+    if (this.mode === "undeletable") return true;
+    return this.data.delete(`${service}|${account}`);
+  }
+}
+
+/** A temp directory per test, removed afterwards. Call it at the top of a file or a `describe`. */
+export function useTempDir(prefix = "gxy-test-"): { readonly path: string } {
+  let dir = "";
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), prefix));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  return {
+    get path() {
+      return dir;
+    },
+  };
+}
+
+/** The real `CombinedStore` over a real `hosts.yml` under `root` and the given fake keyring. */
+export function realStore(root: string, keyring: FakeKeyring, keyringTimeoutMs = 50): { store: CombinedStore; file: FileStore } {
+  const file = new FileStore(join(root, "cfg"));
+  return { file, store: new CombinedStore(file, new KeyringStore(keyring, keyringTimeoutMs)) };
 }
 
 export class FakePending implements PendingDeviceLogin {
@@ -183,6 +242,19 @@ export function harness(
     commandName: "gxy",
   };
   return { deps, store, server, cap, stdin, opened, whoamiCalls, knobs };
+}
+
+/**
+ * Make `get` fail for the given hosts, as a keyring that is down (`throw`) or has lost the secret
+ * (`null`) does, while the record is still listed.
+ */
+export function makeTokenUnreadable(h: Harness, hosts: string[], how: "throw" | "null" = "throw"): void {
+  const get = h.store.get.bind(h.store);
+  h.store.get = async (b) => {
+    if (!hosts.includes(b)) return get(b);
+    if (how === "null") return null;
+    throw new AuthError("not_logged_in", "The token for it is in the system keyring, which is not available: no secret service");
+  };
 }
 
 /** The `AuthError` a promise rejects with (the test fails if it resolves or rejects with anything else). */

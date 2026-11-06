@@ -1,14 +1,10 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
+import { beforeEach, describe, expect, it } from "vitest";
 import { logoutCommand } from "../../src/auth/commands/logout";
-import { FileStore } from "../../src/auth/file-store";
-import { KeyringStore } from "../../src/auth/keyring-store";
-import { CombinedStore } from "../../src/auth/store";
+import type { FileStore } from "../../src/auth/file-store";
+import type { CombinedStore } from "../../src/auth/store";
 import { AuthError } from "../../src/auth/types";
-import { FAKE_TOKEN, HOST, fakeLogin, harness } from "./harness";
-import { FakeKeyring } from "./support";
+import { FAKE_TOKEN, HOST, FakeKeyring, fakeLogin, harness, makeTokenUnreadable, realStore, useTempDir } from "./harness";
 
 describe("auth logout", () => {
   it("revokes the device token while the login is still stored, then deletes the login", async () => {
@@ -67,6 +63,28 @@ describe("auth logout", () => {
     expect(h.cap.err).toContain("store is broken");
   });
 
+  describe("when the token cannot be read", () => {
+    it.each(["throw", "null"] as const)("skips revocation, removes the record and says what happened (%s)", async (how) => {
+      const h = harness({ stored: [fakeLogin()] });
+      makeTokenUnreadable(h, [HOST], how);
+      expect(await logoutCommand({}, h.deps)).toBe(0);
+      expect(h.server.revoked).toEqual([]);
+      expect(await h.store.list()).toEqual([]);
+      expect(h.cap.err).toContain("Removed the stored login for dev.galaxy.example.org");
+      expect(h.cap.err).toMatch(/Could not revoke the token on the server.*could not be read/);
+      expect(h.cap.err).toContain("stays valid until it expires (2026-11-06 18:42 UTC)");
+      expect(h.cap.err).not.toContain(FAKE_TOKEN);
+    });
+
+    it("removes a pasted key's record too, noting that it was not revoked", async () => {
+      const h = harness({ stored: [fakeLogin({ method: "pasted", scopes: [], expiresAt: null })] });
+      makeTokenUnreadable(h, [HOST]);
+      expect(await logoutCommand({}, h.deps)).toBe(0);
+      expect(h.cap.err).toContain("not revoked");
+      expect(await h.store.list()).toEqual([]);
+    });
+  });
+
   it("is a no-op with a note when nothing is stored for the host", async () => {
     const h = harness();
     expect(await logoutCommand({ host: HOST }, h.deps)).toBe(0);
@@ -75,18 +93,13 @@ describe("auth logout", () => {
 });
 
 describe("logout with the Galaxy down, over the real store", () => {
-  let root: string;
+  const tmp = useTempDir("gxy-lo-");
   let keyring: FakeKeyring;
   let file: FileStore;
   let store: CombinedStore;
-  beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), "gxy-lo-"));
+  beforeEach(() => {
     keyring = new FakeKeyring();
-    file = new FileStore(join(root, "cfg"));
-    store = new CombinedStore(file, new KeyringStore(keyring, 50));
-  });
-  afterEach(async () => {
-    await rm(root, { recursive: true, force: true });
+    ({ file, store } = realStore(tmp.path, keyring));
   });
 
   function logoutHarness() {
