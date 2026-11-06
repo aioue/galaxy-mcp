@@ -1,3 +1,4 @@
+import type { AsyncEntry } from "@napi-rs/keyring";
 import type { BaseUrl } from "./types";
 import { trackWedged } from "./wedge";
 
@@ -107,11 +108,20 @@ export class KeyringStore {
   }
 }
 
-/** The real backend. The native module is imported lazily so a missing binary is just "unavailable". */
+/** The real backend. The native module is imported lazily so a missing binary is just "unavailable".
+ * It is only reached when a record says `keyring` or login probes it: file-stored logins never load it. */
 export function nativeBackend(): KeyringBackend {
-  const entry = async (service: string, account: string) => {
-    const { AsyncEntry } = await import("@napi-rs/keyring");
-    return new AsyncEntry(service, account, { linux: { store: "secret-service" } });
+  // One entry per login, built on first use: the constructor talks to the bus, and a write,
+  // its read-back and a delete would otherwise each pay for it.
+  const entries = new Map<string, Promise<AsyncEntry>>();
+  const entry = (service: string, account: string) => {
+    const key = `${service}\0${account}`;
+    let e = entries.get(key);
+    if (!e) {
+      e = import("@napi-rs/keyring").then(({ AsyncEntry }) => new AsyncEntry(service, account, { linux: { store: "secret-service" } }));
+      entries.set(key, e);
+    }
+    return e;
   };
   return {
     async get(service, account) {

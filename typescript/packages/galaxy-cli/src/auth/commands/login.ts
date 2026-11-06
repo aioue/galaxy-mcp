@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { isLoopback, normalizeBaseUrl } from "../base-url";
 import { InputCancelled, isRawCapable, readPiped, readSecret } from "../stdin";
-import { AuthError, type AuthDeps, type BaseUrl, type StoredLogin, type TokenGrant, type WhoAmI } from "../types";
+import { AuthError, type AuthDeps, type AuthServer, type BaseUrl, type PutResult, type StoredLogin, type TokenGrant, type WhoAmI } from "../types";
 import { fail, formatCountdown, formatExpiry, hostOf, sanitize } from "./common";
 
 export interface LoginOptions {
@@ -16,6 +16,7 @@ export interface LoginOptions {
 }
 
 const EX_INTERRUPTED = 130;
+const REVOKE_TIMEOUT_MS = 5000;
 
 /** Lines from stdin, one at a time; readline buffers what arrives between reads. */
 function lineReader(stdin: NodeJS.ReadableStream) {
@@ -73,6 +74,23 @@ function storedMessage(storage: "keyring" | "file", expiresAt: string | null): s
   return `✓ Token stored in ${where} (${expiresAt ? `expires ${formatExpiry(expiresAt)}` : "no expiry"})`;
 }
 
+/** Best effort: a short wait, and say what happened either way, since the person may need to revoke it by hand. */
+async function revokeAfterFailure(server: AuthServer, token: string, host: string, err: (s: string) => void): Promise<void> {
+  if (!server.supportsRevocation) {
+    err(`! ${host} issued a token that could not be kept, and it cannot be revoked from here. Revoke it in Galaxy's user preferences.`);
+    return;
+  }
+  try {
+    await Promise.race([
+      server.revoke(token),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), REVOKE_TIMEOUT_MS).unref()),
+    ]);
+    err(`! The token ${host} issued could not be kept, so it was revoked.`);
+  } catch {
+    err(`! ${host} issued a token that could not be kept, and revoking it failed. Revoke it in Galaxy's user preferences.`);
+  }
+}
+
 export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<number> {
   const err = (s: string) => deps.io.stderr.write(`${s}\n`);
   // One signal for the whole command: every step below either takes it or is raced against it.
@@ -82,10 +100,10 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     // 1. Which Galaxy.
     let baseUrl: BaseUrl;
     if (opts.host) {
-      baseUrl = await abortable(deps.resolveHost(opts.host), signal);
+      baseUrl = await abortable(deps.resolveHost(opts.host, "login"), signal);
     } else {
       try {
-        baseUrl = await abortable(deps.resolveHost(), signal);
+        baseUrl = await abortable(deps.resolveHost(undefined, "login"), signal);
       } catch (e) {
         if (!(e instanceof AuthError && e.kind === "usage") || !deps.io.interactive || opts.withToken) throw e;
         reader = lineReader(deps.io.stdin);
@@ -96,6 +114,8 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       }
     }
     const host = hostOf(baseUrl);
+    // Before a key is read or a code is requested: the person sees where it is going.
+    err(`Logging in to ${host}`);
 
     if (deps.env.GALAXY_API_KEY) {
       err("! GALAXY_API_KEY is set and will take precedence over the login stored now. Unset it to use the stored login.");
@@ -178,23 +198,33 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     err(`Waiting for approval (code expires in ${formatCountdown(pending.expiresAt.getTime() - deps.now().getTime())})…`);
     const grant: TokenGrant = await pending.waitForApproval(signal);
 
-    const who = await abortable(deps.whoami(baseUrl, grant.accessToken, signal), signal);
-    const now = deps.now();
-    const expiresAt = grant.expiresIn !== undefined ? new Date(now.getTime() + grant.expiresIn * 1000).toISOString() : null;
-    signal.throwIfAborted();
-    const put = await deps.store.put(
-      {
-        baseUrl,
-        username: who.username,
-        ...(who.email ? { email: who.email } : {}),
-        token: grant.accessToken,
-        method: "device",
-        scopes: grant.scopes,
-        expiresAt,
-        obtainedAt: now.toISOString(),
-      },
-      { insecureStorage: opts.insecureStorage, ...(who.isAdmin ? { requireKeyring: true } : {}) },
-    );
+    // The server has issued a token. If it cannot be checked or kept, nothing local points at
+    // it, so it would stay valid (an admin's too) until it expires: take it back.
+    let who: WhoAmI;
+    let put: PutResult;
+    let expiresAt: string | null;
+    try {
+      who = await abortable(deps.whoami(baseUrl, grant.accessToken, signal), signal);
+      const now = deps.now();
+      expiresAt = grant.expiresIn !== undefined ? new Date(now.getTime() + grant.expiresIn * 1000).toISOString() : null;
+      signal.throwIfAborted();
+      put = await deps.store.put(
+        {
+          baseUrl,
+          username: who.username,
+          ...(who.email ? { email: who.email } : {}),
+          token: grant.accessToken,
+          method: "device",
+          scopes: grant.scopes,
+          expiresAt,
+          obtainedAt: now.toISOString(),
+        },
+        { insecureStorage: opts.insecureStorage, ...(who.isAdmin ? { requireKeyring: true } : {}) },
+      );
+    } catch (e) {
+      await revokeAfterFailure(server, grant.accessToken, host, err);
+      throw e;
+    }
     if (put.warning) err(`! ${put.warning}`);
     err(`✓ Logged in to ${host} as ${sanitize(who.username)}`);
     err(storedMessage(put.storage, expiresAt));

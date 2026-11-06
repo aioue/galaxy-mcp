@@ -82,7 +82,10 @@ export class FileStore {
     try {
       doc = parseYaml(text);
     } catch (e) {
-      throw this.corrupt(e instanceof Error ? e.message : String(e));
+      // Not the parser's message: it quotes the offending source line, and in this file that
+      // line can be the token. Only where the fault is.
+      const pos = (e as { linePos?: { line: number; col: number }[] }).linePos?.[0];
+      throw this.corrupt(pos ? `YAML syntax error at line ${pos.line}, column ${pos.col}` : "YAML syntax error");
     }
     if (doc === null || doc === undefined) return {};
     const hosts = isObject(doc) ? doc.hosts : undefined;

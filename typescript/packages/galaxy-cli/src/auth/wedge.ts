@@ -14,7 +14,10 @@
  *   synchronously on the main thread. Against a bus that accepts the connection and never
  *   completes authentication, the constructor blocks the whole process: no timer, signal
  *   handler or timeout can run. (Ctrl-C and SIGTERM still kill it, as no JS handler is
- *   installed.) The only way round that is not to load the keyring: `GXY_NO_KEYRING=1`.
+ *   installed.) The only way round that is not to load the keyring: `GXY_NO_KEYRING=1`. We
+ *   keep the exposure small (the keyring is only touched when a record says `keyring`, or when
+ *   login probes it once; a file-stored login never loads the module). Known limitation; a
+ *   follow-up would build the entry in a `worker_thread` the parent can terminate on a deadline.
  *
  * Not a blanket `process.exit()`: that can cut off stdout when it is a pipe. We only exit when a
  * call really is stuck, and only after the streams have drained.

@@ -42,7 +42,8 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .option("--quiet", "suppress status messages", false)
     .option("--timeout <ms>", "poll timeout for blocking ops");
 
-  registerAuth(program, deps.makeAuthDeps ?? createAuthDeps);
+  // `auth` shares the operations' host rule, so it needs the global --url/--profile (read at run time).
+  registerAuth(program, deps.makeAuthDeps ?? ((name) => createAuthDeps(name, () => program.opts<{ url?: string; profile?: string }>())));
 
   for (const op of allOperations) {
     const cmd = program.command(op.name).description(inCliNames(describeOperation(op), op.input));
