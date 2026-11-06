@@ -1,4 +1,5 @@
 import type { GalaxyErrorKind } from "@galaxyproject/galaxy-ops";
+import type { AuthErrorKind } from "./auth/types";
 
 export const EX_USAGE = 64;
 export const EX_DATAERR = 65;
@@ -23,4 +24,21 @@ const MAP: Record<GalaxyErrorKind, number> = {
 export function exitCodeFor(kind?: GalaxyErrorKind): number {
   if (!kind) return 0;
   return MAP[kind] ?? EX_SOFTWARE;
+}
+
+/** Exit codes for `auth` failures, by kind (docs: "Exit codes"). */
+const AUTH_MAP: Record<AuthErrorKind, number> = {
+  usage: EX_USAGE,
+  ambiguous_host: EX_USAGE,
+  network: EX_UNAVAILABLE,
+  unsupported: EX_PROTOCOL,
+  protocol: EX_PROTOCOL,
+  insecure: EX_PROTOCOL,
+  not_logged_in: EX_NOPERM,
+  denied: EX_NOPERM,
+  expired: EX_NOPERM,
+};
+
+export function exitCodeForAuthError(kind: AuthErrorKind): number {
+  return AUTH_MAP[kind] ?? EX_SOFTWARE;
 }

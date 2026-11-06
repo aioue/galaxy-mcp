@@ -11,15 +11,29 @@ import { applyInputs } from "./flags-apply";
 import { buildInput, inCliNames, keptPositionals } from "./flags";
 import { render, type Format } from "./render";
 import { exitCodeFor, EX_USAGE, EX_SOFTWARE } from "./exit";
+import { basename } from "node:path";
+import { registerAuth } from "./auth/register";
+import { createAuthDeps } from "./auth/deps";
+import type { AuthDeps } from "./auth/types";
+
+/** `gxy` when invoked through that name, else `galaxy-cli`. */
+export function programName(invoked: string | undefined = process.argv[1]): string {
+  const base = invoked ? basename(invoked).replace(/\.(cmd|exe|js)$/i, "") : "";
+  return base === "gxy" ? "gxy" : "galaxy-cli";
+}
 
 export interface CliDeps {
   makeContext?: (conn: Connection, signal: AbortSignal) => GalaxyContext;
+  /** Tests inject fakes here; by default the real wiring in `auth/deps.ts`. */
+  makeAuthDeps?: (commandName: string) => AuthDeps;
+  /** The name the program was invoked as (default: from `process.argv[1]`). */
+  invokedAs?: string;
 }
 
 export function buildProgram(deps: CliDeps = {}): Command {
   const program = new Command();
   program
-    .name("galaxy-cli")
+    .name(programName(deps.invokedAs))
     .description("Galaxy agent operations on the command line")
     .option("--url <url>", "Galaxy base URL")
     .option("--api-key <key>", "Galaxy API key")
@@ -27,6 +41,8 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .option("--format <fmt>", "output format: table|json|text", "table")
     .option("--quiet", "suppress status messages", false)
     .option("--timeout <ms>", "poll timeout for blocking ops");
+
+  registerAuth(program, deps.makeAuthDeps ?? createAuthDeps);
 
   for (const op of allOperations) {
     const cmd = program.command(op.name).description(inCliNames(describeOperation(op), op.input));
@@ -38,6 +54,12 @@ export function buildProgram(deps: CliDeps = {}): Command {
       const positionals = args.slice(0, -2) as (string | undefined)[];
       const globals = command.optsWithGlobals<{ url?: string; apiKey?: string; profile?: string; format: Format; quiet: boolean; timeout?: string }>();
 
+      if (globals.apiKey) {
+        console.error(
+          `Warning: --api-key is deprecated: the key is visible in shell history and process listings. Use \`${program.name()} auth login\` or set GALAXY_API_KEY instead.`,
+        );
+      }
+
       const parsed = buildInput(op.input, positionals, localOpts, keptPositionals(op.name));
       if (!parsed.success) {
         console.error(parsed.error.message);
@@ -48,7 +70,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
       let conn: Connection = { baseUrl: "", apiKey: "" };
       if (!deps.makeContext) {
         try {
-          conn = resolveConnection({ url: globals.url, apiKey: globals.apiKey, profile: globals.profile }, loadSources());
+          conn = resolveConnection({ url: globals.url, apiKey: globals.apiKey, profile: globals.profile }, await loadSources());
         } catch (e) {
           console.error((e as Error).message);
           process.exitCode = EX_USAGE;
