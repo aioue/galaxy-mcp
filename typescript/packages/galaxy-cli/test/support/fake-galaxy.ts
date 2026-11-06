@@ -91,6 +91,12 @@ export interface FakeGalaxy {
   setDeviceAuthorizationOverride(r: { status: number; body: string; contentType?: string } | null): void;
   /** Make the token endpoint answer this response whenever the code is not otherwise resolved. */
   setTokenOverride(r: { status: number; body: string; contentType?: string } | null): void;
+  /**
+   * Answer every request whose path ends with `pathSuffix` with a redirect to `location`
+   * (default 302), before anything else; `null` removes it. For proving a client does not
+   * follow a redirect with credentials attached.
+   */
+  setRedirect(pathSuffix: string, location: string | null, status?: number): void;
   /** Revoke from the server side, as an admin or expiry would. */
   revokeToken(token: string): void;
   /** Tokens issued so far, in order. */
@@ -132,6 +138,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
   let deviceOverride: { status: number; body: string; contentType?: string } | null = null;
   let tokenOverride: { status: number; body: string; contentType?: string } | null = null;
   let slowDowns = 0;
+  const redirects = new Map<string, { location: string; status: number }>();
 
   const requests: RecordedRequest[] = [];
   const devices = new Map<string, DeviceEntry>(); // by user code
@@ -173,6 +180,13 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
 
     const path = new URL(req.url ?? "/", "http://x").pathname;
     const method = req.method ?? "GET";
+
+    for (const [suffix, r] of redirects) {
+      if (path.endsWith(suffix)) {
+        res.writeHead(r.status, { location: r.location });
+        return void res.end();
+      }
+    }
 
     if (method === "GET" && path === `/.well-known/oauth-authorization-server${prefix}`) {
       switch (metadataMode) {
@@ -303,6 +317,10 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     setInvalidKeyResponse: (k) => void (invalidKey = k),
     setDeviceAuthorizationOverride: (r) => void (deviceOverride = r),
     setTokenOverride: (r) => void (tokenOverride = r),
+    setRedirect(suffix, location, status = 302) {
+      if (location === null) redirects.delete(suffix);
+      else redirects.set(suffix, { location, status });
+    },
     revokeToken(token) {
       const t = tokens.get(token);
       if (t) t.revoked = true;
