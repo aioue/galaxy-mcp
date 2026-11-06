@@ -95,7 +95,8 @@ describe("buildProgram", () => {
     const names = program.commands.map((c) => c.name());
     expect(names).toContain("get_histories");
     expect(names).toContain("create_history");
-    expect(names.length).toBe(allOperations.length);
+    // the `auth` group is the one non-operation command
+    expect(names.filter((n) => n !== "auth").length).toBe(allOperations.length);
   });
 
   it("says in --help what an op needs from the server", () => {
