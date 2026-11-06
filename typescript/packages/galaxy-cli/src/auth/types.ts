@@ -163,6 +163,11 @@ export interface AuthDeps {
    * several are stored and none was named, and `AuthError("usage")` when none is stored.
    */
   resolveHost(explicit?: string, purpose?: "login"): Promise<BaseUrl>;
+  /**
+   * The Galaxy named by `.env` (`GALAXY_URL`) or the selected profile, which `login` ignores by
+   * design; lets it say so when that differs from the host it uses. Absent means none.
+   */
+  ignoredLoginHost?(): { source: "dotenv" | "profile"; url: string } | undefined;
   /** Open a URL in the user's browser. Resolves false when there is no browser to open. */
   openBrowser(url: string): Promise<boolean>;
   /** Whether `openBrowser` has any chance (a display exists). Absent means "assume yes". */

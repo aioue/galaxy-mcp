@@ -105,7 +105,7 @@ describe("auth login (device flow)", () => {
     h.server.supportsDeviceFlow = false;
     expect(await loginCommand({ host: HOST_ARG }, h.deps)).toBe(76);
     expect(h.cap.err).toContain(
-      "dev.galaxy.example.org does not offer device login (it may be switched off by its admins). Paste an API key instead: gxy auth login --host https://dev.galaxy.example.org --with-token",
+      "dev.galaxy.example.org does not offer device login yet (it may be switched off by its admins). Paste an API key instead: gxy auth login --host https://dev.galaxy.example.org --with-token",
     );
   });
 

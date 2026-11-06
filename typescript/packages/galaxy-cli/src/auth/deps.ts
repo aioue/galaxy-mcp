@@ -33,6 +33,13 @@ export function createAuthDeps(commandName: string, globals: () => { url?: strin
         commandName,
       });
     },
+    ignoredLoginHost: () => {
+      const src = loadSources();
+      const dotenv = src.dotenv.GALAXY_URL;
+      if (dotenv) return { source: "dotenv", url: dotenv };
+      const profile = globals().profile ? src.profiles[globals().profile!]?.galaxy_url : undefined;
+      return profile ? { source: "profile", url: profile } : undefined;
+    },
     openBrowser: (url) => openBrowser(url, env),
     canOpenBrowser: () => canOpenBrowser(env),
     now: () => new Date(),

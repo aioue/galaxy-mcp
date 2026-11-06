@@ -15,6 +15,15 @@ export interface LoginOptions {
   signal?: AbortSignal;
 }
 
+/** Same Galaxy, however the URL was written; an unparsable one never matches. */
+function sameGalaxy(a: string, b: string): boolean {
+  try {
+    return normalizeBaseUrl(a) === b;
+  } catch {
+    return false;
+  }
+}
+
 const EX_INTERRUPTED = 130;
 const REVOKE_TIMEOUT_MS = 5000;
 
@@ -59,14 +68,22 @@ function isTrustedVerificationUri(uri: string, baseUrl: string): boolean {
   }
 }
 
-/** Warnings a person should see before they walk away from a fresh login. */
-function tokenWarnings(host: string, who: WhoAmI, expiresAt: string | null): string[] {
-  const out: string[] = [];
-  if (who.isAdmin) out.push(`! This token carries full admin rights on ${host}. Treat it like a password.`);
-  if (expiresAt === null) {
-    out.push("! This token has no expiry: it works until you revoke it in Galaxy's user preferences.");
-  }
-  return out;
+/** Printed before the token is stored, so it shows even when storing is refused. */
+function adminWarning(host: string, who: WhoAmI): string | undefined {
+  return who.isAdmin ? `! This token carries full admin rights on ${host}. Treat it like a password.` : undefined;
+}
+
+/** Warnings a person should see after a fresh login is stored (the admin one came earlier). */
+function tokenWarnings(expiresAt: string | null): string[] {
+  return expiresAt === null ? ["! This token has no expiry: it works until you revoke it in Galaxy's user preferences."] : [];
+}
+
+/** One wording and hint for every way a Galaxy can lack device login. */
+function noDeviceLogin(deps: AuthDeps, host: string, baseUrl: string, why: string): AuthError {
+  return new AuthError(
+    "unsupported",
+    `${host} does not offer device login yet (${why}). Paste an API key instead: ${deps.commandName} auth login --host ${baseUrl} --with-token`,
+  );
 }
 
 function storedMessage(storage: "keyring" | "file", expiresAt: string | null): string {
@@ -114,6 +131,17 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       }
     }
     const host = hostOf(baseUrl);
+    // Login never takes its host from `.env` or a profile (see pickHost); say so when one disagrees.
+    if (!opts.host) {
+      const ignored = deps.ignoredLoginHost?.();
+      if (ignored && !sameGalaxy(ignored.url, baseUrl)) {
+        err(
+          ignored.source === "dotenv"
+            ? `Ignoring GALAXY_URL from .env (${ignored.url}): login only uses --host or GALAXY_URL from the environment.`
+            : `Ignoring galaxy_url from the --profile (${ignored.url}): login only uses --host or GALAXY_URL from the environment.`,
+        );
+      }
+    }
     // Before a key is read or a code is requested: the person sees where it is going.
     err(`Logging in to ${host}`);
 
@@ -148,22 +176,26 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       // The write is atomic and short, so it is not interrupted; this is the last point to cancel.
       signal.throwIfAborted();
       // An admin's token is never written to the plaintext file unless asked for by flag.
+      const adminWarn = adminWarning(host, who);
+      if (adminWarn) err(adminWarn);
       const put = await deps.store.put(login, { insecureStorage: opts.insecureStorage, ...(who.isAdmin ? { requireKeyring: true } : {}) });
       if (put.warning) err(`! ${put.warning}`);
       err(`✓ Logged in to ${host} as ${sanitize(who.username)}`);
       err(storedMessage(put.storage, null));
-      for (const w of tokenWarnings(host, who, null)) err(w);
+      for (const w of tokenWarnings(null)) err(w);
       return 0;
     }
 
     // 2b. The device flow.
-    const server = await abortable(deps.discover(baseUrl, signal), signal);
-    if (!server.supportsDeviceFlow) {
-      throw new AuthError(
-        "unsupported",
-        `${host} does not offer device login (it may be switched off by its admins). Paste an API key instead: ${deps.commandName} auth login --host ${baseUrl} --with-token`,
-      );
+    let server: AuthServer;
+    try {
+      server = await abortable(deps.discover(baseUrl, signal), signal);
+    } catch (e) {
+      // Discovery says "unsupported" only when there is no usable metadata (404, not JSON).
+      if (e instanceof AuthError && e.kind === "unsupported") throw noDeviceLogin(deps, host, baseUrl, "it publishes no OAuth metadata");
+      throw e;
     }
+    if (!server.supportsDeviceFlow) throw noDeviceLogin(deps, host, baseUrl, "it may be switched off by its admins");
     const scopes = opts.scopes ?? [];
     // A cancel during discovery must not create a code on the server.
     signal.throwIfAborted();
@@ -208,6 +240,8 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       const now = deps.now();
       expiresAt = grant.expiresIn !== undefined ? new Date(now.getTime() + grant.expiresIn * 1000).toISOString() : null;
       signal.throwIfAborted();
+      const adminWarn = adminWarning(host, who);
+      if (adminWarn) err(adminWarn);
       put = await deps.store.put(
         {
           baseUrl,
@@ -228,7 +262,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     if (put.warning) err(`! ${put.warning}`);
     err(`✓ Logged in to ${host} as ${sanitize(who.username)}`);
     err(storedMessage(put.storage, expiresAt));
-    for (const w of tokenWarnings(host, who, expiresAt)) err(w);
+    for (const w of tokenWarnings(expiresAt)) err(w);
     return 0;
   } catch (e) {
     if (signal.aborted || e instanceof InputCancelled) {

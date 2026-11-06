@@ -145,7 +145,7 @@ export interface Harness {
 
 /** A set of in-memory fakes behind `AuthDeps`. `stdinText` is written and ended at once. */
 export function harness(
-  opts: { interactive?: boolean; env?: Record<string, string>; stdinText?: string; stored?: StoredLogin[]; hostFromEnv?: string } = {},
+  opts: { interactive?: boolean; env?: Record<string, string>; stdinText?: string; stored?: StoredLogin[]; hostFromEnv?: string; ignoredLoginHost?: { source: "dotenv" | "profile"; url: string } } = {},
 ): Harness {
   const store = new FakeStore();
   for (const l of opts.stored ?? []) store.seed(l);
@@ -179,6 +179,7 @@ export function harness(
       if (all.length > 1) throw new AuthError("ambiguous_host", `Several logins: ${all.map((l) => l.baseUrl).join(", ")}. Pass --host.`);
       throw new AuthError("usage", "No Galaxy named. Pass --host <url>.");
     },
+    ignoredLoginHost: () => opts.ignoredLoginHost,
     async openBrowser(url) {
       opened.push(url);
       return knobs.browserOpens;
