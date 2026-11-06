@@ -128,6 +128,8 @@ export class AuthError extends Error {
 export interface WhoAmI {
   username: string;
   email?: string;
+  /** Galaxy's `is_admin`. An admin's token carries full, unscoped admin power until scopes exist. */
+  isAdmin?: boolean;
 }
 
 export interface AuthIo {
