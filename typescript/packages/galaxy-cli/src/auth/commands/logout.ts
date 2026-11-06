@@ -1,5 +1,5 @@
 import type { AuthDeps } from "../types";
-import { fail, formatExpiry, hostOf } from "./common";
+import { fail, formatExpiry, hostOf, sanitize } from "./common";
 
 export interface LogoutOptions {
   host?: string;
@@ -29,11 +29,18 @@ export async function logoutCommand(opts: LogoutOptions, deps: AuthDeps): Promis
           revoked = true;
         }
       } catch (e) {
-        revokeProblem = e instanceof Error ? e.message : String(e);
+        revokeProblem = sanitize(e instanceof Error ? e.message : String(e));
       }
     }
 
-    await deps.store.delete(baseUrl);
+    // Local removal is attempted whatever the server said, and its own failure is reported
+    // too: a secret that may remain in the keyring is something the person must know.
+    let deleteProblem: string | null = null;
+    try {
+      await deps.store.delete(baseUrl);
+    } catch (e) {
+      deleteProblem = sanitize(e instanceof Error ? e.message : String(e), { keepNewlines: true });
+    }
 
     if (login.method === "pasted") {
       err(`✓ Removed the stored API key for ${host}`);
@@ -45,6 +52,10 @@ export async function logoutCommand(opts: LogoutOptions, deps: AuthDeps): Promis
       err(`✓ Removed the stored login for ${host}`);
       const until = login.expiresAt ? `until it expires (${formatExpiry(login.expiresAt)})` : "until it is revoked in Galaxy";
       err(`! Could not revoke the token on the server (${revokeProblem}). It stays valid ${until}.`);
+    }
+    if (deleteProblem) {
+      err(`! ${deleteProblem}`);
+      return 1;
     }
     return 0;
   } catch (e) {

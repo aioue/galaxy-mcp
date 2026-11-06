@@ -7,6 +7,7 @@ import { envCommand, SHELLS } from "./commands/env";
 import { headersCommand } from "./commands/headers";
 import { logoutCommand } from "./commands/logout";
 import { EX_SOFTWARE } from "../exit";
+import { exitQuietlyOnEpipe } from "./epipe";
 
 /** `--scopes a,b` or `--scopes "a b"`. */
 export function parseScopes(value: string): string[] {
@@ -23,6 +24,7 @@ export function registerAuth(program: Command, makeDeps: (commandName: string) =
   const host = () => new Option("--host <url>", "Galaxy base URL (default: GALAXY_URL, or the only stored login)");
 
   const run = async (fn: (deps: AuthDeps) => Promise<number>): Promise<void> => {
+    exitQuietlyOnEpipe();
     let deps: AuthDeps;
     try {
       deps = makeDeps(commandName);

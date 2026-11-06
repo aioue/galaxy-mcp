@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { normalizeBaseUrl } from "../base-url";
-import { AuthError, type AuthDeps, type BaseUrl, type StoredLogin, type TokenGrant } from "../types";
-import { fail, formatCountdown, formatExpiry, hostOf } from "./common";
+import { AuthError, type AuthDeps, type BaseUrl, type StoredLogin, type TokenGrant, type WhoAmI } from "../types";
+import { fail, formatCountdown, formatExpiry, hostOf, sanitize } from "./common";
 
 export interface LoginOptions {
   host?: string;
@@ -54,6 +54,16 @@ async function readAll(stdin: NodeJS.ReadableStream): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** Warnings a person should see before they walk away from a fresh login. */
+function tokenWarnings(host: string, who: WhoAmI, expiresAt: string | null): string[] {
+  const out: string[] = [];
+  if (who.isAdmin) out.push(`! This token carries full admin rights on ${host}. Treat it like a password.`);
+  if (expiresAt === null) {
+    out.push("! This token has no expiry: it works until you revoke it in Galaxy's user preferences.");
+  }
+  return out;
+}
+
 function storedMessage(storage: "keyring" | "file", expiresAt: string | null): string {
   const where = storage === "keyring" ? "the system keyring" : "a file readable only by you";
   return `✓ Token stored in ${where} (${expiresAt ? `expires ${formatExpiry(expiresAt)}` : "no expiry"})`;
@@ -101,10 +111,12 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
         expiresAt: null,
         obtainedAt: deps.now().toISOString(),
       };
-      const put = await deps.store.put(login, { insecureStorage: opts.insecureStorage });
+      // An admin's token is never written to the plaintext file unless asked for by flag.
+      const put = await deps.store.put(login, { insecureStorage: opts.insecureStorage, ...(who.isAdmin ? { requireKeyring: true } : {}) });
       if (put.warning) err(`! ${put.warning}`);
-      err(`✓ Logged in to ${host} as ${who.username}`);
+      err(`✓ Logged in to ${host} as ${sanitize(who.username)}`);
       err(storedMessage(put.storage, null));
+      for (const w of tokenWarnings(host, who, null)) err(w);
       return 0;
     }
 
@@ -120,11 +132,11 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     const pending = await server.startDeviceLogin(scopes.length ? scopes : undefined);
 
     err(`Requesting access to ${host}`);
-    err(`  Scopes  ${scopes.length ? scopes.join(" ") : "server default"}`);
+    err(`  Scopes  ${scopes.length ? sanitize(scopes.join(" ")) : "server default"}`);
     err("");
     err("! Only approve this code if you ran this command yourself.");
-    err(`  One-time code: ${pending.userCode}`);
-    err(`  Enter it at ${pending.verificationUri}`);
+    err(`  One-time code: ${sanitize(pending.userCode)}`);
+    err(`  Enter it at ${sanitize(pending.verificationUri)}`);
 
     const canOpen = opts.browser !== false && deps.io.interactive && (deps.canOpenBrowser?.() ?? true);
     const ac = new AbortController();
@@ -170,11 +182,12 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
         expiresAt,
         obtainedAt: now.toISOString(),
       },
-      { insecureStorage: opts.insecureStorage },
+      { insecureStorage: opts.insecureStorage, ...(who.isAdmin ? { requireKeyring: true } : {}) },
     );
     if (put.warning) err(`! ${put.warning}`);
-    err(`✓ Logged in to ${host} as ${who.username}`);
+    err(`✓ Logged in to ${host} as ${sanitize(who.username)}`);
     err(storedMessage(put.storage, expiresAt));
+    for (const w of tokenWarnings(host, who, expiresAt)) err(w);
     return 0;
   } catch (e) {
     return fail(deps, e);

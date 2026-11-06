@@ -1,5 +1,7 @@
 import * as client from "openid-client";
 import { isLoopback } from "./base-url";
+import { describeNetworkError } from "./network";
+import { sanitize } from "./sanitize";
 import { AuthError, CLIENT_ID, type AuthServer, type BaseUrl, type PendingDeviceLogin, type TokenGrant } from "./types";
 
 export interface DiscoverOptions {
@@ -115,7 +117,8 @@ type Phase = "discovery" | "device" | "poll" | "revoke";
 /** Turn whatever openid-client threw into an `AuthError` of the right kind. */
 function mapError(err: unknown, phase: Phase, baseUrl: string): AuthError {
   if (err instanceof AuthError) return err;
-  const detail = err instanceof Error ? err.message : String(err);
+  // Server text reaches these messages (error texts, response excerpts), and they get printed.
+  const detail = sanitize(err instanceof Error ? err.message : String(err));
 
   if (err instanceof client.ResponseBodyError) {
     switch (err.error) {
@@ -124,7 +127,7 @@ function mapError(err: unknown, phase: Phase, baseUrl: string): AuthError {
       case "expired_token":
         return new AuthError("expired", "The login code expired before it was approved.", { cause: err });
       default:
-        return new AuthError("protocol", `${baseUrl} refused the request: ${err.error}${err.error_description ? ` (${err.error_description})` : ""}.`, { cause: err });
+        return new AuthError("protocol", `${baseUrl} refused the request: ${sanitize(err.error)}${err.error_description ? ` (${sanitize(err.error_description)})` : ""}.`, { cause: err });
     }
   }
 
@@ -148,12 +151,7 @@ function mapError(err: unknown, phase: Phase, baseUrl: string): AuthError {
 
   // fetch failures (refused, DNS, reset, timeout) surface as TypeError or a timeout DOMException.
   if (err instanceof TypeError || (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError"))) {
-    return new AuthError("network", `Could not reach ${baseUrl}: ${causeMessage(err)}.`, { cause: err });
+    return new AuthError("network", describeNetworkError(err, baseUrl), { cause: err });
   }
   return new AuthError("protocol", `Unexpected failure talking to ${baseUrl}: ${detail}.`, { cause: err });
-}
-
-function causeMessage(err: Error): string {
-  const cause = err.cause;
-  return cause instanceof Error ? cause.message : err.message;
 }

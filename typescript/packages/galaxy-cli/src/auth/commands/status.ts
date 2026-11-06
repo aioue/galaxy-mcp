@@ -1,5 +1,5 @@
 import { AuthError, type AuthDeps, type StoredLogin, type StorageKind } from "../types";
-import { fail, formatExpiry, formatTimeLeft, hostOf, isExpired, maskToken, describeStorage } from "./common";
+import { fail, formatExpiry, formatTimeLeft, hostOf, isExpired, maskToken, describeStorage, sanitize } from "./common";
 
 export interface StatusOptions {
   host?: string;
@@ -13,6 +13,8 @@ interface Checked {
   login: StoredLogin & { storage: StorageKind };
   state: State;
   username: string;
+  /** From the live check; undefined when the check did not run or did not say. */
+  isAdmin?: boolean;
   problem?: string;
 }
 
@@ -48,14 +50,14 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
       }
       try {
         const who = await deps.whoami(login.baseUrl, login.token);
-        checked.push({ login, state: "ok", username: who.username });
+        checked.push({ login, state: "ok", username: who.username, ...(who.isAdmin !== undefined ? { isAdmin: who.isAdmin } : {}) });
       } catch (e) {
         const invalid = e instanceof AuthError && e.kind === "not_logged_in";
         checked.push({
           login,
           state: invalid ? "invalid" : "error",
           username: login.username,
-          problem: e instanceof Error ? e.message : String(e),
+          problem: sanitize(e instanceof Error ? e.message : String(e)),
         });
       }
     }
@@ -63,10 +65,11 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
     if (opts.json) {
       const out = checked.map((c) => ({
         base_url: c.login.baseUrl,
-        username: c.username,
+        username: sanitize(c.username),
+        is_admin: c.isAdmin ?? null,
         storage: c.login.storage,
         method: c.login.method,
-        scopes: c.login.scopes,
+        scopes: c.login.scopes.map((s) => sanitize(s)),
         obtained_at: c.login.obtainedAt,
         expires_at: c.login.expiresAt,
         status: c.state,
@@ -80,19 +83,25 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
     const envKey = deps.env.GALAXY_API_KEY;
     for (const c of checked) {
       const l = c.login;
-      err(hostOf(l.baseUrl));
-      if (c.state === "ok") err(`  ✓ Logged in as ${c.username}`);
+      err(sanitize(hostOf(l.baseUrl)));
+      if (c.state === "ok") err(`  ✓ Logged in as ${sanitize(c.username)}`);
       else if (c.state === "expired") err(`  ✗ Login expired at ${formatExpiry(l.expiresAt!)}. Run: ${deps.commandName} auth login --host ${l.baseUrl}`);
       else err(`  ✗ ${c.problem}`);
       err(`  Storage  ${describeStorage(l.storage)}`);
       err(`  Method   ${l.method === "device" ? "device login" : "pasted API key"}`);
-      err(`  Scopes   ${l.scopes.length ? l.scopes.join(" ") : l.method === "pasted" ? "full access (API key)" : "server default"}`);
+      err(`  Scopes   ${l.scopes.length ? sanitize(l.scopes.join(" ")) : l.method === "pasted" ? "full access (API key)" : "server default"}`);
       if (l.expiresAt && c.state !== "expired") {
         err(`  Expires  in ${formatTimeLeft(new Date(l.expiresAt).getTime() - now.getTime())} (${formatExpiry(l.expiresAt)})`);
       } else if (!l.expiresAt) {
         err("  Expires  no expiry");
       }
-      err(`  Token    ${opts.showToken ? l.token : maskToken(l.token)}`);
+      // Masked on stderr always: the secret itself, when asked for, goes to stdout.
+      err(`  Token    ${maskToken(l.token)}`);
+      if (c.isAdmin) err(`  ! This token carries full admin rights on ${hostOf(l.baseUrl)}. Treat it like a password.`);
+      if (!l.expiresAt) err("  ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.");
+    }
+    if (opts.showToken) {
+      for (const c of checked) deps.io.stdout.write(`${c.login.baseUrl}\t${c.login.token}\n`);
     }
     if (envKey) err("\nGALAXY_API_KEY is set and takes precedence over stored logins.");
     return checked.some((c) => c.state !== "ok") ? 1 : 0;

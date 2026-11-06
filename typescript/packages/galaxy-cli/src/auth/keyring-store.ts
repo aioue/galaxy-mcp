@@ -53,8 +53,20 @@ export class KeyringStore {
     return this.call("write", () => this.backend.set(keyringService(baseUrl), account, secret));
   }
 
-  delete(baseUrl: BaseUrl, account: string): Promise<boolean> {
-    return this.call("delete", () => this.backend.delete(keyringService(baseUrl), account));
+  /**
+   * Delete, then read back and require nothing there. Some backends report success for a
+   * delete that did not happen (a locked collection, a different item matched), and a token
+   * that quietly stays in the keyring after `logout` is the worst outcome, so "deleted" has
+   * to be observed, not assumed.
+   */
+  async delete(baseUrl: BaseUrl, account: string): Promise<boolean> {
+    const service = keyringService(baseUrl);
+    const existed = await this.call("delete", () => this.backend.delete(service, account));
+    const remaining = await this.call("check after delete", () => this.backend.get(service, account));
+    if (remaining !== null) {
+      throw new KeyringUnavailableError("The system keyring still holds the secret after a delete, so it may remain there.");
+    }
+    return existed;
   }
 
   private async call<T>(what: string, fn: () => Promise<T>): Promise<T> {

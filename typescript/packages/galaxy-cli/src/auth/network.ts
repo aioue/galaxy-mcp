@@ -1,0 +1,42 @@
+import { sanitize } from "./sanitize";
+
+const TLS_CODES = /^(CERT_|ERR_TLS_|UNABLE_TO_(GET_ISSUER_CERT|VERIFY_LEAF|GET_CRL)|SELF_SIGNED_CERT|DEPTH_ZERO_SELF_SIGNED|HOSTNAME_MISMATCH|ERR_SSL_)/;
+
+function codeOf(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+/** Walk `cause` links: fetch hides the real error (ECONNREFUSED, a certificate failure) one or two levels down. */
+function rootCause(err: Error): Error {
+  let e: Error = err;
+  for (let i = 0; i < 5 && e.cause instanceof Error; i++) e = e.cause;
+  return e;
+}
+
+/**
+ * The message for a request that never got an answer, naming the fixes that exist.
+ *
+ * A certificate failure usually means a private CA (set `NODE_EXTRA_CA_CERTS` to its PEM
+ * file) and a refused or timed-out connection often means a proxy Node's `fetch` is not
+ * using: it ignores `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` (Node 22.21 or later). The
+ * advice never includes turning certificate checking off.
+ */
+export function describeNetworkError(err: Error, target: string): string {
+  const cause = rootCause(err);
+  const detail = sanitize(cause.message || err.message);
+  const code = codeOf(cause);
+  const tls = (code !== undefined && TLS_CODES.test(code)) || /certificate|self.signed|TLS|SSL/i.test(cause.message);
+  if (tls) {
+    return (
+      `Could not make a secure connection to ${target}: ${detail}. ` +
+      "If it uses a certificate from a private CA, set NODE_EXTRA_CA_CERTS to the CA's PEM file and try again. " +
+      "If you reach the internet through a proxy, note that Node ignores HTTPS_PROXY unless NODE_USE_ENV_PROXY=1 is set (Node 22.21 or later)."
+    );
+  }
+  return (
+    `Could not reach ${target}: ${detail}. ` +
+    "If you reach the internet through a proxy, note that Node ignores HTTPS_PROXY unless NODE_USE_ENV_PROXY=1 is set (Node 22.21 or later); " +
+    "for a private CA, set NODE_EXTRA_CA_CERTS."
+  );
+}

@@ -8,12 +8,20 @@ import { AuthError, type BaseUrl } from "./types";
  * Query, fragment and trailing slashes are dropped, the host is lower-cased by URL itself,
  * and default ports vanish the same way.
  *
+ * A trailing `/api` is dropped too: people paste the API root, and `https://x/api` and
+ * `https://x` are the same Galaxy. Control characters and whitespace anywhere in the URL are
+ * refused rather than trimmed (a stray `\r` from a CRLF file would otherwise quietly become
+ * a different key), and comparison is always exact, never by prefix.
+ *
  * Plain http is refused except to loopback: a token sent in the clear is a token handed
  * out, and the only honest use for http here is a Galaxy on this machine.
  */
 export function normalizeBaseUrl(input: string): BaseUrl {
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(input)) throw new AuthError("usage", "The Galaxy URL contains a control character.");
   const raw = input.trim();
   if (!raw) throw new AuthError("usage", "No Galaxy URL given.");
+  if (/\s/.test(raw)) throw new AuthError("usage", "The Galaxy URL contains whitespace.");
   const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
   let url: URL;
   try {
@@ -30,7 +38,7 @@ export function normalizeBaseUrl(input: string): BaseUrl {
   if (url.protocol === "http:" && !isLoopback(url.hostname)) {
     throw new AuthError("insecure", `Refusing plain http to ${url.host}: a token would cross the network unencrypted. Use https.`);
   }
-  const path = url.pathname.replace(/\/+$/, "");
+  const path = url.pathname.replace(/\/+$/, "").replace(/\/api$/, "").replace(/\/+$/, "");
   return `${url.protocol}//${url.host}${path}` as BaseUrl;
 }
 

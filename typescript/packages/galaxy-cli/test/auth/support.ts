@@ -18,7 +18,7 @@ export function fakeLogin(over: Partial<StoredLogin> = {}): StoredLogin {
 /** In-memory keyring. `mode` makes it fail, hang, or accept writes it cannot serve. */
 export class FakeKeyring implements KeyringBackend {
   data = new Map<string, string>();
-  mode: "ok" | "throw" | "hang" | "lossy" = "ok";
+  mode: "ok" | "throw" | "hang" | "lossy" | "undeletable" = "ok";
   private gate() {
     if (this.mode === "throw") return Promise.reject(new Error("no secret service"));
     if (this.mode === "hang") return new Promise<never>(() => {});
@@ -34,6 +34,8 @@ export class FakeKeyring implements KeyringBackend {
   }
   async delete(service: string, account: string) {
     await this.gate();
+    // "undeletable": says it deleted, and did not.
+    if (this.mode === "undeletable") return true;
     return this.data.delete(`${service}|${account}`);
   }
 }
