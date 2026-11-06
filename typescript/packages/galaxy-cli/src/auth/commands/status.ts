@@ -1,4 +1,5 @@
-import { AuthError, type AuthDeps, type StoredLogin, type StorageKind } from "../types";
+import { checkExpiry, describeExpiry } from "../expiry";
+import { AuthError, type AuthDeps, type LoginSummary, type StoredLogin } from "../types";
 import { fail, formatExpiry, formatTimeLeft, hostOf, isExpired, maskToken, describeStorage, sanitize } from "./common";
 
 export interface StatusOptions {
@@ -7,10 +8,12 @@ export interface StatusOptions {
   showToken?: boolean;
 }
 
-type State = "ok" | "expired" | "invalid" | "error";
+/** `unavailable`: the record is there but its token cannot be read (keyring down, secret gone). */
+type State = "ok" | "expired" | "invalid" | "error" | "unavailable";
 
 interface Checked {
-  login: StoredLogin & { storage: StorageKind };
+  /** Without a token when it could not be read; `login` is then the record alone. */
+  login: LoginSummary & { token?: string };
   state: State;
   username: string;
   /** From the live check; undefined when the check did not run or did not say. */
@@ -21,31 +24,38 @@ interface Checked {
 export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promise<number> {
   const err = (s: string) => deps.io.stderr.write(`${s}\n`);
   try {
-    const logins: (StoredLogin & { storage: StorageKind })[] = [];
+    let summaries = await deps.store.list();
     if (opts.host) {
       const baseUrl = await deps.resolveHost(opts.host);
-      const one = await deps.store.get(baseUrl);
-      if (one) logins.push(one);
-      else if (!opts.json) {
+      summaries = summaries.filter((s) => s.baseUrl === baseUrl);
+      if (summaries.length === 0 && !opts.json) {
         err(`Not logged in to ${hostOf(baseUrl)}. Run: ${deps.commandName} auth login --host ${baseUrl}`);
         return 77;
       }
-    } else {
-      for (const s of await deps.store.list()) {
-        const full = await deps.store.get(s.baseUrl);
-        if (full) logins.push(full);
-      }
-      if (logins.length === 0 && !opts.json) {
-        err(`No stored logins. Run: ${deps.commandName} auth login --host <url>`);
-        return 77;
-      }
+    } else if (summaries.length === 0 && !opts.json) {
+      err(`No stored logins. Run: ${deps.commandName} auth login --host <url>`);
+      return 77;
     }
 
     const now = deps.now();
     const checked: Checked[] = [];
-    for (const login of logins) {
-      if (isExpired(login.expiresAt, now)) {
-        checked.push({ login, state: "expired", username: login.username, problem: `expired at ${formatExpiry(login.expiresAt!)}` });
+    for (const summary of summaries) {
+      // Each host on its own: one unreadable token must not hide the others.
+      let login: (StoredLogin & { storage: LoginSummary["storage"] }) | null = null;
+      let unreadable: string;
+      try {
+        login = await deps.store.get(summary.baseUrl);
+        unreadable = "the token is not in the store";
+      } catch (e) {
+        unreadable = e instanceof Error ? e.message : String(e);
+      }
+      if (!login) {
+        checked.push({ login: summary, state: "unavailable", username: summary.username, problem: `token unavailable: ${sanitize(unreadable)}` });
+        continue;
+      }
+      const expiry = checkExpiry(login.expiresAt, now);
+      if (expiry.state === "expired" || expiry.state === "unreadable") {
+        checked.push({ login, state: "expired", username: login.username, problem: describeExpiry(login.expiresAt!, now) });
         continue;
       }
       try {
@@ -74,7 +84,7 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
         expires_at: c.login.expiresAt,
         status: c.state,
         ...(c.problem ? { error: c.problem } : {}),
-        ...(opts.showToken ? { token: c.login.token } : {}),
+        ...(opts.showToken && c.login.token !== undefined ? { token: c.login.token } : {}),
       }));
       deps.io.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
       return 0;
@@ -85,23 +95,25 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
       const l = c.login;
       err(sanitize(hostOf(l.baseUrl)));
       if (c.state === "ok") err(`  ✓ Logged in as ${sanitize(c.username)}`);
-      else if (c.state === "expired") err(`  ✗ Login expired at ${formatExpiry(l.expiresAt!)}. Run: ${deps.commandName} auth login --host ${l.baseUrl}`);
+      else if (c.state === "expired") err(`  ✗ Login ${c.problem}. Run: ${deps.commandName} auth login --host ${l.baseUrl}`);
+      else if (c.state === "unavailable") err(`  ✗ ${c.problem}. Run: ${deps.commandName} auth login --host ${l.baseUrl}`);
       else err(`  ✗ ${c.problem}`);
       err(`  Storage  ${describeStorage(l.storage)}`);
       err(`  Method   ${l.method === "device" ? "device login" : "pasted API key"}`);
       err(`  Scopes   ${l.scopes.length ? sanitize(l.scopes.join(" ")) : l.method === "pasted" ? "full access (API key)" : "server default"}`);
-      if (l.expiresAt && c.state !== "expired") {
-        err(`  Expires  in ${formatTimeLeft(new Date(l.expiresAt).getTime() - now.getTime())} (${formatExpiry(l.expiresAt)})`);
-      } else if (!l.expiresAt) {
+      const expiry = checkExpiry(l.expiresAt, now);
+      if (expiry.state === "valid") {
+        err(`  Expires  in ${formatTimeLeft(expiry.at.getTime() - now.getTime())} (${formatExpiry(l.expiresAt!)})`);
+      } else if (expiry.state === "none") {
         err("  Expires  no expiry");
       }
       // Masked on stderr always: the secret itself, when asked for, goes to stdout.
-      err(`  Token    ${maskToken(l.token)}`);
+      err(`  Token    ${l.token === undefined ? "unavailable" : maskToken(l.token)}`);
       if (c.isAdmin) err(`  ! This token carries full admin rights on ${hostOf(l.baseUrl)}. Treat it like a password.`);
-      if (!l.expiresAt) err("  ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.");
+      if (l.expiresAt === null && l.token !== undefined) err("  ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.");
     }
     if (opts.showToken) {
-      for (const c of checked) deps.io.stdout.write(`${c.login.baseUrl}\t${c.login.token}\n`);
+      for (const c of checked) if (c.login.token !== undefined) deps.io.stdout.write(`${c.login.baseUrl}\t${c.login.token}\n`);
     }
     if (envKey) err("\nGALAXY_API_KEY is set and takes precedence over stored logins.");
     return checked.some((c) => c.state !== "ok") ? 1 : 0;

@@ -1,9 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, stat, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { BaseUrl, LoginMethod, LoginSummary, StorageKind } from "./types";
+
+const STALE_TEMP_MS = 60 * 60 * 1000;
 
 /** One host's entry in `hosts.yml`. `token` is present only when `storage` is `file`. */
 export interface HostRecord extends LoginSummary {
@@ -59,6 +61,9 @@ export class FileStore {
 
   private async readAll(): Promise<Record<BaseUrl, HostRecord>> {
     await this.assertSafe();
+    // Before the content is read, never after: a file others could read or write must not be
+    // trusted for longer than it takes to fix the mode.
+    await this.repairFileMode();
     let text: string;
     try {
       // O_NOFOLLOW closes the gap between the lstat above and this open.
@@ -72,7 +77,6 @@ export class FileStore {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
       throw e;
     }
-    await this.repairFileMode();
     if (!text.trim()) return {};
     let doc: unknown;
     try {
@@ -159,6 +163,7 @@ export class FileStore {
       await chmod(this.dir, 0o700);
       this.warn(`${this.dir} was accessible to others (${dirMode.toString(8)}); changed it to 700.`);
     }
+    await this.removeStaleTemps();
     const tmp = join(dirname(this.path), `.hosts.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
     // 'wx' + 0600 so the secret is never briefly readable under a looser umask.
     const fh = await open(tmp, "wx", 0o600);
@@ -214,6 +219,24 @@ export class FileStore {
       if (problem) {
         throw new Error(`Refusing to use ${p}: it ${problem}. It would hold your login tokens, so it must be a plain ${what} you own. Remove it or point GXY_CONFIG_DIR somewhere else.`);
       }
+    }
+  }
+
+  /**
+   * A write killed between creating its temp file and the rename leaves `.hosts.*.tmp`, which
+   * may hold a token. Remove the ones old enough that no live write can own them. Best effort.
+   */
+  private async removeStaleTemps(): Promise<void> {
+    try {
+      const cutoff = Date.now() - STALE_TEMP_MS;
+      for (const name of await readdir(this.dir)) {
+        if (!/^\.hosts\..+\.tmp$/.test(name)) continue;
+        const p = join(this.dir, name);
+        const st = await lstat(p);
+        if (st.isFile() && st.mtimeMs < cutoff) await unlink(p);
+      }
+    } catch {
+      // Cleaning up is never worth failing a login for.
     }
   }
 

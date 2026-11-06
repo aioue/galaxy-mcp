@@ -123,7 +123,7 @@ describe.each(["gxy", "galaxy-cli"])("%s auth, end to end", (name) => {
     expect(galaxy.isTokenValid(token)).toBe(false);
     expect(await readFile(join(configDir, "hosts.yml"), "utf8")).not.toContain(galaxy.baseUrl);
     const gone = await run(["auth", "token"]);
-    expect(gone.exitCode).toBe(64); // nothing stored, so no Galaxy to mean
+    expect(gone.exitCode).toBe(77); // nothing stored: not logged in
     expect(gone.stdout).toBe("");
   }, 60_000);
 

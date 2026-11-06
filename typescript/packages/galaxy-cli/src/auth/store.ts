@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { FileStore, type HostRecord } from "./file-store";
-import { KeyringStore } from "./keyring-store";
+import { KeyringStore, noKeyringBackend } from "./keyring-store";
 import { configDir } from "./paths";
 import { AuthError, type BaseUrl, type CredentialStore, type LoginSummary, type PutResult, type StoredLogin, type StorageKind } from "./types";
 
@@ -26,7 +26,14 @@ export class CombinedStore implements CredentialStore {
     } catch (e) {
       throw new AuthError("not_logged_in", `The token for ${baseUrl} is in the system keyring, which is not available: ${(e as Error).message}`, { cause: e });
     }
-    if (token === null) return null;
+    // The record says the token is in the keyring and it is not there: that is a login we
+    // cannot use, not "no login", and callers must not read it as a clean slate.
+    if (token === null) {
+      throw new AuthError(
+        "not_logged_in",
+        `The login record for ${baseUrl} says its token is in the system keyring, but the keyring has none. Log in again to replace it.`,
+      );
+    }
     return { ...summary, token };
   }
 
@@ -58,7 +65,16 @@ export class CombinedStore implements CredentialStore {
     }
     const record: HostRecord = storage === "file" ? { ...summary, storage, token } : { ...summary, storage };
     // Metadata (and so the plaintext token, if any, being dropped) is replaced in one atomic write.
-    await this.file.put(record);
+    try {
+      await this.file.put(record);
+    } catch (e) {
+      // The secret is in the keyring but no record points at it: take it back out, best effort,
+      // unless it overwrote the entry an existing record still points at.
+      if (storage === "keyring" && !(prior?.storage === "keyring" && prior.username === login.username)) {
+        await this.keyring.delete(login.baseUrl, login.username).catch(() => {});
+      }
+      throw e;
+    }
     // Clean up what the new record no longer points at.
     if (prior?.storage === "keyring" && (storage === "file" || prior.username !== login.username)) {
       await this.keyring.delete(login.baseUrl, prior.username).catch(() => {});
@@ -94,11 +110,15 @@ export class CombinedStore implements CredentialStore {
   }
 }
 
-/** The real store: config dir from the environment, the native keyring. */
+/**
+ * The real store, the only one: config dir from the environment, the native keyring unless
+ * `GXY_NO_KEYRING` is set (to anything but "", "0" or "false").
+ */
 export function createCredentialStore(
   env: Record<string, string | undefined> = process.env,
   home: string = homedir(),
   warn: (message: string) => void = (m) => process.stderr.write(`warning: ${m}\n`),
 ): CredentialStore {
-  return new CombinedStore(new FileStore(configDir(env, home), undefined, warn), new KeyringStore());
+  const off = env.GXY_NO_KEYRING && env.GXY_NO_KEYRING !== "0" && env.GXY_NO_KEYRING.toLowerCase() !== "false";
+  return new CombinedStore(new FileStore(configDir(env, home), undefined, warn), new KeyringStore(off ? noKeyringBackend : undefined));
 }

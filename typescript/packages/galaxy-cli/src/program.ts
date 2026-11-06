@@ -10,11 +10,11 @@ import { resolveConnection, loadSourcesAsync, type Connection } from "./config";
 import { applyInputs } from "./flags-apply";
 import { buildInput, inCliNames, keptPositionals } from "./flags";
 import { render, type Format } from "./render";
-import { exitCodeFor, EX_USAGE, EX_SOFTWARE } from "./exit";
+import { exitCodeFor, exitCodeForAuthError, EX_USAGE, EX_SOFTWARE } from "./exit";
 import { basename } from "node:path";
 import { registerAuth } from "./auth/register";
-import { createAuthDeps, createStore } from "./auth/deps";
-import type { AuthDeps } from "./auth/types";
+import { createAuthDeps } from "./auth/deps";
+import { AuthError, type AuthDeps } from "./auth/types";
 
 /** `gxy` when invoked through that name, else `galaxy-cli`. */
 export function programName(invoked: string | undefined = process.argv[1]): string {
@@ -71,11 +71,12 @@ export function buildProgram(deps: CliDeps = {}): Command {
       if (!deps.makeContext) {
         try {
           const flags = { url: globals.url, apiKey: globals.apiKey, profile: globals.profile };
-          conn = resolveConnection(flags, await loadSourcesAsync(flags, { store: createStore() }));
+          conn = resolveConnection(flags, await loadSourcesAsync(flags));
           if (conn.warning) console.error(`Warning: ${conn.warning}`);
         } catch (e) {
           console.error((e as Error).message);
-          process.exitCode = EX_USAGE;
+          // An expired login is 77 and an ambiguous host 64, as for `auth`; anything else is a usage problem.
+          process.exitCode = e instanceof AuthError ? exitCodeForAuthError(e.kind) : EX_USAGE;
           return;
         }
       }

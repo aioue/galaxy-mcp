@@ -63,8 +63,18 @@ If the Galaxy has the device flow switched off, or you already have a key, pipe 
 | `auth logout` | revoke the token where the server allows it, and delete the stored login |
 
 Tokens live in the system keyring when there is one, otherwise in `hosts.yml` in the config
-directory (`$GXY_CONFIG_DIR`, else `~/.config/gxy`), readable only by you. `GXY_NO_KEYRING=1`
-never uses the keyring. A `GALAXY_API_KEY` (or `--api-key`) still wins over a stored login.
+directory (`$GXY_CONFIG_DIR`, else `~/.config/gxy`), readable only by you. A `GALAXY_API_KEY`
+(or `--api-key`) still wins over a stored login.
+
+| Variable | Does |
+| --- | --- |
+| `GXY_CONFIG_DIR` | Where `hosts.yml` lives (default `~/.config/gxy`; `$XDG_CONFIG_HOME/gxy` when that is set) |
+| `GXY_NO_KEYRING` | `1` never touches the system keyring: tokens go to `hosts.yml`, with a warning. Use it on a box whose keyring hangs or is locked |
+
+A login counts as expired a minute before its expiry time, so a token that passes `auth token`
+has time to do its job. If the keyring cannot be read, `auth logout` still removes the stored
+record (it says the token was not revoked and may remain valid until it expires) and `auth status`
+reports that host as "token unavailable" and exits 1.
 
 ### Keeping tokens away from agents
 

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { normalizeBaseUrl } from "./auth/base-url";
 import { createCredentialStore } from "./auth/store";
+import { describeExpiry, isExpired } from "./auth/expiry";
 import { AuthError, type BaseUrl, type CredentialStore, type StoredLogin } from "./auth/types";
 
 /** `warning` is set when a usable key was found but something the user should know about was not. */
@@ -41,20 +42,26 @@ export function resolveConnection(flags: GlobalFlags, src: Sources): Connection 
   const explicitKey = flags.apiKey ?? src.env.GALAXY_API_KEY;
   const otherKey = src.dotenv.GALAXY_API_KEY ?? prof?.galaxy_user_key ?? prof?.galaxy_admin_key;
   const login = baseUrl && !explicitKey ? matchingLogin(baseUrl, src.storedLogin) : undefined;
-  const expired = login && login.expiresAt !== null && Date.parse(login.expiresAt) <= (src.now ?? new Date()).getTime();
+  const now = src.now ?? new Date();
+  // An unreadable expiry counts as expired, and so does one within a minute of running out.
+  const expired = login && isExpired(login.expiresAt, now);
 
   let apiKey: string | undefined = explicitKey;
   let warning: string | undefined = src.storeProblem;
-  if (!apiKey && login && !expired) apiKey = login.token;
+  let usedStored = false;
+  if (!apiKey && login && !expired) {
+    apiKey = login.token;
+    usedStored = true;
+  }
   if (!apiKey) apiKey = otherKey;
   if (!apiKey && expired) {
     throw new AuthError(
       "not_logged_in",
-      `Your login to ${login.baseUrl} expired at ${login.expiresAt}; run gxy auth login --host ${login.baseUrl}`,
+      `Your login to ${login.baseUrl} ${describeExpiry(login.expiresAt!, now)}; run gxy auth login --host ${login.baseUrl}`,
     );
   }
   if (expired && apiKey) {
-    warning = `Your login to ${login.baseUrl} expired at ${login.expiresAt}; using another key instead. Run gxy auth login --host ${login.baseUrl} to renew it.`;
+    warning = `Your login to ${login.baseUrl} ${describeExpiry(login.expiresAt!, now)}; using another key instead. Run gxy auth login --host ${login.baseUrl} to renew it.`;
   }
   if (!baseUrl || !apiKey) {
     throw new Error(
@@ -63,7 +70,10 @@ export function resolveConnection(flags: GlobalFlags, src: Sources): Connection 
         (src.storeProblem ? ` (${src.storeProblem})` : ""),
     );
   }
-  return warning ? { baseUrl, apiKey, warning } : { baseUrl, apiKey };
+  // The key goes to the vetted form of the URL it was stored for, not to the raw string
+  // (which may carry a query or an odd path) that merely normalises to it.
+  const target = usedStored ? login!.baseUrl : baseUrl;
+  return warning ? { baseUrl: target, apiKey, warning } : { baseUrl: target, apiKey };
 }
 
 function matchingLogin(baseUrl: string, login: StoredLogin | undefined): StoredLogin | undefined {

@@ -1,4 +1,6 @@
 import { exitCodeForAuthError, EX_SOFTWARE } from "../../exit";
+import { describeExpiry, formatExpiry, isExpired } from "../expiry";
+import { NoHostError } from "../host";
 import { sanitize } from "../sanitize";
 import { AuthError, type AuthDeps, type BaseUrl, type StoredLogin, type StorageKind } from "../types";
 
@@ -26,14 +28,7 @@ export function hostOf(baseUrl: string): string {
   }
 }
 
-export function isExpired(expiresAt: string | null, now: Date): boolean {
-  return expiresAt !== null && new Date(expiresAt).getTime() <= now.getTime();
-}
-
-/** "2026-11-06 18:42 UTC" */
-export function formatExpiry(iso: string): string {
-  return `${new Date(iso).toISOString().slice(0, 16).replace("T", " ")} UTC`;
-}
+export { isExpired, formatExpiry };
 
 /** "7h 58m", "2d 3h", "12m", "under a minute". */
 export function formatTimeLeft(ms: number): string {
@@ -67,7 +62,16 @@ export function describeStorage(kind: StorageKind): string {
  * how to log in. No network: `token`, `env` and `headers` are called by helpers.
  */
 export async function requireLogin(deps: AuthDeps, explicitHost?: string): Promise<StoredLogin> {
-  return requireLoginAt(deps, await deps.resolveHost(explicitHost));
+  let baseUrl: BaseUrl;
+  try {
+    baseUrl = await deps.resolveHost(explicitHost);
+  } catch (e) {
+    // Nothing stored and nothing named is "not logged in" here (77), not a usage error: the
+    // caller is a helper that needs a token, and the fix is to log in.
+    if (e instanceof NoHostError) throw new AuthError("not_logged_in", `Not logged in; run ${deps.commandName} auth login --host <url>`, { cause: e });
+    throw e;
+  }
+  return requireLoginAt(deps, baseUrl);
 }
 
 /** `requireLogin` for a Galaxy the caller has already settled on. */
@@ -76,7 +80,7 @@ export async function requireLoginAt(deps: AuthDeps, baseUrl: BaseUrl): Promise<
   const hint = `${deps.commandName} auth login --host ${baseUrl}`;
   if (!login) throw new AuthError("not_logged_in", `Not logged in to ${baseUrl}. Run: ${hint}`);
   if (isExpired(login.expiresAt, deps.now())) {
-    throw new AuthError("not_logged_in", `Your login to ${baseUrl} expired at ${formatExpiry(login.expiresAt!)}. Run: ${hint}`);
+    throw new AuthError("not_logged_in", `Your login to ${baseUrl} ${describeExpiry(login.expiresAt!, deps.now())}. Run: ${hint}`);
   }
   return login;
 }

@@ -12,6 +12,14 @@ export interface ResolveHostInput {
   commandName?: string;
 }
 
+/** Nothing named and nothing stored. A `usage` error for `login` (which then asks); `requireLogin` reports it as not logged in. */
+export class NoHostError extends AuthError {
+  constructor() {
+    super("usage", "No Galaxy given and none logged in. Pass --host <url>.");
+    this.name = "NoHostError";
+  }
+}
+
 /** Which Galaxy a command means: `--host`, `GALAXY_URL` (env, then .env), the only stored login. */
 export async function resolveHost(input: ResolveHostInput): Promise<BaseUrl> {
   const named = input.explicit || input.env.GALAXY_URL || input.dotenv.GALAXY_URL;
@@ -19,7 +27,7 @@ export async function resolveHost(input: ResolveHostInput): Promise<BaseUrl> {
   const stored = await input.store.list();
   if (stored.length === 1) return stored[0]!.baseUrl;
   if (stored.length === 0) {
-    throw new AuthError("usage", "No Galaxy given and none logged in. Pass --host <url>.");
+    throw new NoHostError();
   }
   throw new AuthError(
     "ambiguous_host",

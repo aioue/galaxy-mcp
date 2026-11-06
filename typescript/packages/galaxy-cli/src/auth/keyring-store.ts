@@ -1,4 +1,5 @@
 import type { BaseUrl } from "./types";
+import { trackWedged } from "./wedge";
 
 /**
  * The OS keyring, behind a seam tests can fake. The real backend is `@napi-rs/keyring`
@@ -34,6 +35,19 @@ export class KeyringUnavailableError extends Error {
     this.name = "KeyringUnavailableError";
   }
 }
+
+/** A keyring that is never there, for `GXY_NO_KEYRING=1`: tokens go to the file, as on a headless box. */
+export const noKeyringBackend: KeyringBackend = {
+  async get() {
+    throw new KeyringUnavailableError("disabled by GXY_NO_KEYRING");
+  },
+  async set() {
+    throw new KeyringUnavailableError("disabled by GXY_NO_KEYRING");
+  },
+  async delete() {
+    throw new KeyringUnavailableError("disabled by GXY_NO_KEYRING");
+  },
+};
 
 export function keyringService(baseUrl: BaseUrl): string {
   return `gxy:${baseUrl}`;
@@ -72,13 +86,18 @@ export class KeyringStore {
   private async call<T>(what: string, fn: () => Promise<T>): Promise<T> {
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new KeyringUnavailableError(`The system keyring did not answer a ${what} within ${this.timeoutMs} ms.`)),
-        this.timeoutMs,
-      );
+      timer = setTimeout(() => {
+        reject(new KeyringUnavailableError(`The system keyring did not answer a ${what} within ${this.timeoutMs} ms.`));
+      }, this.timeoutMs);
     });
     try {
-      return await Promise.race([fn(), timeout]);
+      const work = fn();
+      // Give up waiting, not working: the native call cannot be cancelled and keeps the process
+      // alive until it returns (see wedge.ts), so note it for as long as it is outstanding.
+      void timeout.catch(() => {
+        trackWedged(work);
+      });
+      return await Promise.race([work, timeout]);
     } catch (e) {
       if (e instanceof KeyringUnavailableError) throw e;
       throw new KeyringUnavailableError(`The system keyring failed a ${what}: ${e instanceof Error ? e.message : String(e)}`, { cause: e });

@@ -1,4 +1,4 @@
-import type { AuthDeps } from "../types";
+import type { AuthDeps, StoredLogin } from "../types";
 import { fail, formatExpiry, hostOf, sanitize } from "./common";
 
 export interface LogoutOptions {
@@ -11,15 +11,28 @@ export async function logoutCommand(opts: LogoutOptions, deps: AuthDeps): Promis
   try {
     const baseUrl = await deps.resolveHost(opts.host);
     const host = hostOf(baseUrl);
-    const login = await deps.store.get(baseUrl);
-    if (!login) {
+    // The record (no secret) decides whether there is anything to remove. Reading the token is
+    // only needed to revoke it, and must not stand between the person and removing the record:
+    // the keyring may be down or the secret gone, which is when cleaning up matters most.
+    const summary = (await deps.store.list()).find((s) => s.baseUrl === baseUrl);
+    if (!summary) {
       err(`Not logged in to ${host}; nothing to remove.`);
       return 0;
+    }
+    let login: StoredLogin | null = null;
+    let unreadable: string | null = null;
+    try {
+      login = await deps.store.get(baseUrl);
+      if (!login) unreadable = "the token is not in the store";
+    } catch (e) {
+      unreadable = sanitize(e instanceof Error ? e.message : String(e));
     }
 
     let revoked = false;
     let revokeProblem: string | null = null;
-    if (login.method === "device") {
+    if (!login) {
+      revokeProblem = `the stored token could not be read: ${unreadable}`;
+    } else if (login.method === "device") {
       try {
         const server = await deps.discover(baseUrl);
         if (!server.supportsRevocation) {
@@ -42,7 +55,7 @@ export async function logoutCommand(opts: LogoutOptions, deps: AuthDeps): Promis
       deleteProblem = sanitize(e instanceof Error ? e.message : String(e), { keepNewlines: true });
     }
 
-    if (login.method === "pasted") {
+    if (summary.method === "pasted") {
       err(`✓ Removed the stored API key for ${host}`);
       err(`! The key itself was not revoked and still works. Manage it in Galaxy's user preferences: ${baseUrl}/user/api_key`);
     } else if (revoked) {
@@ -50,7 +63,7 @@ export async function logoutCommand(opts: LogoutOptions, deps: AuthDeps): Promis
       err(`✓ Removed the stored login for ${host}`);
     } else {
       err(`✓ Removed the stored login for ${host}`);
-      const until = login.expiresAt ? `until it expires (${formatExpiry(login.expiresAt)})` : "until it is revoked in Galaxy";
+      const until = summary.expiresAt ? `until it expires (${formatExpiry(summary.expiresAt)})` : "until it is revoked in Galaxy";
       err(`! Could not revoke the token on the server (${revokeProblem}). It stays valid ${until}.`);
     }
     if (deleteProblem) {
