@@ -38,6 +38,75 @@ codes follow `sysexits.h` conventions (e.g. `77` for auth failures).
 Run `galaxy-cli --help`, or `galaxy-cli <command> --help`, for the full list of
 commands and their arguments.
 
+## Logging in
+
+`gxy auth` stores a login so you don't have to put an API key in a shell variable or a
+command line. `gxy` and `galaxy-cli` are the same program.
+
+```bash
+gxy auth login --host https://usegalaxy.org   # device flow: approve a one-time code in your browser
+gxy auth status                               # stored logins, checked against Galaxy
+gxy get_user                                  # operations use the stored login, no flags
+gxy auth logout                               # revoke the token and delete it
+```
+
+If the Galaxy has the device flow switched off, or you already have a key, pipe it in:
+`printf %s "$KEY" | gxy auth login --host <url> --with-token`.
+
+| Command | Does |
+| --- | --- |
+| `auth login` | device flow, or `--with-token` to read a key from stdin; `--scopes`, `--no-browser`, `--insecure-storage` |
+| `auth status` | show stored logins and check each one (`--json`, `--show-token`) |
+| `auth token` | print the token on stdout |
+| `auth env` | print `GALAXY_URL` and `GALAXY_API_KEY` assignments, for `eval` |
+| `auth headers` | print `{"x-api-key": ...}` as JSON, for an MCP `headersHelper` |
+| `auth logout` | revoke the token where the server allows it, and delete the stored login |
+
+Tokens live in the system keyring when there is one, otherwise in `hosts.yml` in the config
+directory (`$GXY_CONFIG_DIR`, else `~/.config/gxy`), readable only by you. `GXY_NO_KEYRING=1`
+never uses the keyring. A `GALAXY_API_KEY` (or `--api-key`) still wins over a stored login.
+
+### Keeping tokens away from agents
+
+`gxy auth env` puts the token in the environment of every process started from that shell,
+and `gxy auth token` prints it where a transcript can keep it. Agents should run
+`gxy <operation>` and let it read the stored login, rather than handling tokens themselves.
+In Claude Code you can say so in `.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "deny": ["Bash(gxy auth token*)", "Bash(gxy auth env*)", "Read(~/.config/gxy/**)"]
+  }
+}
+```
+
+These rules match the command text; they are not a sandbox. A different spelling of the
+same command, or a script that runs it, is not caught.
+
+### Galaxy's MCP endpoint
+
+To give Claude Code the stored login for a Galaxy's `/api/mcp` endpoint without putting a key
+in the config file:
+
+```json
+{
+  "mcpServers": {
+    "galaxy": {
+      "type": "http",
+      "url": "https://usegalaxy.org/api/mcp",
+      "headersHelper": "gxy auth headers"
+    }
+  }
+}
+```
+
+### Certificates and proxies
+
+For a Galaxy with a certificate from a private CA, set `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`.
+Node's `fetch` ignores `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` is set (Node 22.21 and
+later). Login never offers to switch off certificate checks.
+
 ## Documentation
 
 See the [TypeScript workspace README](https://github.com/galaxyproject/galaxy-mcp/tree/main/typescript#readme)

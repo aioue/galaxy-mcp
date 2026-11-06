@@ -6,14 +6,14 @@ import {
   createGalaxyContext,
   type GalaxyContext,
 } from "@galaxyproject/galaxy-ops";
-import { resolveConnection, loadSources, type Connection } from "./config";
+import { resolveConnection, loadSourcesAsync, type Connection } from "./config";
 import { applyInputs } from "./flags-apply";
 import { buildInput, inCliNames, keptPositionals } from "./flags";
 import { render, type Format } from "./render";
 import { exitCodeFor, EX_USAGE, EX_SOFTWARE } from "./exit";
 import { basename } from "node:path";
 import { registerAuth } from "./auth/register";
-import { createAuthDeps } from "./auth/deps";
+import { createAuthDeps, createStore } from "./auth/deps";
 import type { AuthDeps } from "./auth/types";
 
 /** `gxy` when invoked through that name, else `galaxy-cli`. */
@@ -70,7 +70,9 @@ export function buildProgram(deps: CliDeps = {}): Command {
       let conn: Connection = { baseUrl: "", apiKey: "" };
       if (!deps.makeContext) {
         try {
-          conn = resolveConnection({ url: globals.url, apiKey: globals.apiKey, profile: globals.profile }, await loadSources());
+          const flags = { url: globals.url, apiKey: globals.apiKey, profile: globals.profile };
+          conn = resolveConnection(flags, await loadSourcesAsync(flags, { store: createStore() }));
+          if (conn.warning) console.error(`Warning: ${conn.warning}`);
         } catch (e) {
           console.error((e as Error).message);
           process.exitCode = EX_USAGE;

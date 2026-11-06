@@ -47,6 +47,8 @@ export interface Approval {
   expiresIn?: number | null;
   username?: string;
   email?: string;
+  /** Make `/api/users/current` report `is_admin: true` for this token. */
+  admin?: boolean;
 }
 
 export interface RecordedRequest {
@@ -64,6 +66,8 @@ export interface RecordedRequest {
 }
 
 /** How `/.well-known/oauth-authorization-server...` answers. */
+export type VersionMode = "ok" | "redirect" | "html";
+
 export type MetadataMode = "ok" | "not-found" | "not-json" | "malformed" | "wrong-issuer";
 
 export interface FakeGalaxy {
@@ -86,6 +90,8 @@ export interface FakeGalaxy {
   setRevocationEndpoint(on: boolean): void;
   setMetadataMode(mode: MetadataMode): void;
   /** What `/api/users/current` says for an unknown key: 200 with the anonymous shape (default), or 403. */
+  /** What `/api/version` answers: the version (default), a 302 to another origin, or an HTML page. */
+  setVersionMode(mode: VersionMode): void;
   setInvalidKeyResponse(kind: "anonymous" | "forbidden"): void;
   /** Make the device authorization endpoint answer this response instead (e.g. malformed JSON). */
   setDeviceAuthorizationOverride(r: { status: number; body: string; contentType?: string } | null): void;
@@ -115,6 +121,7 @@ interface TokenEntry {
   token: string;
   username: string;
   email: string;
+  admin: boolean;
   expiresAtMs: number | null;
   revoked: boolean;
 }
@@ -128,6 +135,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
   let deviceFlow = options.deviceFlow ?? true;
   let revocation = options.revocationEndpoint ?? true;
   let metadataMode: MetadataMode = "ok";
+  let versionMode: VersionMode = "ok";
   let invalidKey: "anonymous" | "forbidden" = "anonymous";
   let deviceOverride: { status: number; body: string; contentType?: string } | null = null;
   let tokenOverride: { status: number; body: string; contentType?: string } | null = null;
@@ -237,6 +245,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
         token,
         username: a.username ?? "fake-user",
         email: a.email ?? "fake-user@example.org",
+        admin: a.admin ?? false,
         expiresAtMs: expiresIn === null ? null : Date.now() + expiresIn * 1000,
         revoked: false,
       });
@@ -257,10 +266,19 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
       return void res.end();
     }
 
+    if (method === "GET" && local === "/api/version") {
+      if (versionMode === "redirect") return void (res.writeHead(302, { location: "https://elsewhere.example/api/version" }), res.end());
+      if (versionMode === "html") {
+        res.writeHead(200, { "content-type": "text/html" });
+        return void res.end("<html>Please log in</html>");
+      }
+      return json(res, 200, { version_major: "24.2", version_minor: "0" });
+    }
+
     if (method === "GET" && local === "/api/users/current") {
       const key = req.headers["x-api-key"];
       const t = typeof key === "string" ? tokens.get(key) : undefined;
-      if (tokenIsValid(t)) return json(res, 200, { id: `fake-id-${t.username}`, username: t.username, email: t.email });
+      if (tokenIsValid(t)) return json(res, 200, { id: `fake-id-${t.username}`, username: t.username, email: t.email, is_admin: t.admin });
       if (invalidKey === "forbidden") return json(res, 403, { err_code: 403001, err_msg: "API authentication required for this request" });
       return json(res, 200, { total_disk_usage: 0, nice_total_disk_usage: "0 bytes", quota_percent: null });
     }
@@ -300,6 +318,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     setDeviceFlow: (on) => void (deviceFlow = on),
     setRevocationEndpoint: (on) => void (revocation = on),
     setMetadataMode: (m) => void (metadataMode = m),
+    setVersionMode: (m) => void (versionMode = m),
     setInvalidKeyResponse: (k) => void (invalidKey = k),
     setDeviceAuthorizationOverride: (r) => void (deviceOverride = r),
     setTokenOverride: (r) => void (tokenOverride = r),
