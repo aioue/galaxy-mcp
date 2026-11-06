@@ -1,4 +1,5 @@
 import { createGalaxyContext, getUser } from "@galaxyproject/galaxy-ops";
+import { describeNetworkError } from "./network";
 import { AuthError, type BaseUrl, type WhoAmI } from "./types";
 import { USER_AGENT } from "./user-agent";
 
@@ -23,8 +24,7 @@ export async function probeGalaxy(baseUrl: BaseUrl, fetchImpl: FetchImpl = globa
     });
   } catch (e) {
     if (signal?.aborted) throw signal.reason ?? e;
-    const cause = e instanceof Error && e.cause instanceof Error ? e.cause.message : e instanceof Error ? e.message : String(e);
-    throw new AuthError("network", `Could not reach ${baseUrl}: ${cause}.`, { cause: e });
+    throw new AuthError("network", describeNetworkError(e instanceof Error ? e : new Error(String(e)), baseUrl), { cause: e });
   }
   if (res.status >= 300 && res.status < 400) {
     const where = res.headers.get("location");
@@ -113,7 +113,8 @@ function mapFailure(e: unknown, baseUrl: string): AuthError {
   const err = e as { kind?: string; status?: number; http?: { status: number | null } };
   const status = err.status ?? err.http?.status;
   if (err.kind === "connection" && status == null) {
-    return new AuthError("network", `Could not reach ${baseUrl}: ${(e as Error).message}.`, { cause: e });
+    // Names NODE_EXTRA_CA_CERTS / NODE_USE_ENV_PROXY, as the OAuth calls do.
+    return new AuthError("network", describeNetworkError(e as Error, baseUrl), { cause: e });
   }
   if (typeof status === "number") {
     if (status >= 500) return new AuthError("network", `${baseUrl} answered HTTP ${status}.`, { cause: e });
