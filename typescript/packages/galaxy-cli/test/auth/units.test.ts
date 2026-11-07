@@ -128,6 +128,18 @@ describe("normalizeBaseUrl", () => {
     expect(normalizeBaseUrl(input)).toBe(expected);
   });
 
+  // The result is a credential key and `resolveHost` normalises a stored key again, so it must be a fixed point.
+  it.each([
+    ["https://h.example/api/api", "https://h.example"],
+    ["https://h.example/api//api/", "https://h.example"],
+    ["https://h.example/galaxy/api/api/api", "https://h.example/galaxy"],
+    ["https://h.example/api/galaxy/api", "https://h.example/api/galaxy"],
+  ])("strips every trailing /api, so normalising twice changes nothing: %s", (input, expected) => {
+    const once = normalizeBaseUrl(input);
+    expect(once).toBe(expected);
+    expect(normalizeBaseUrl(once)).toBe(once);
+  });
+
   it("keeps only an exact /api suffix: a longer segment is a different Galaxy", () => {
     expect(normalizeBaseUrl("https://host.example/apiary")).toBe("https://host.example/apiary");
     expect(normalizeBaseUrl("https://host.example/api/v2")).toBe("https://host.example/api/v2");
@@ -148,5 +160,27 @@ describe("normalizeBaseUrl", () => {
   it("refuses plain http except to loopback, and other schemes", () => {
     expect(() => normalizeBaseUrl("http://host.example")).toThrow(expect.objectContaining({ kind: "insecure" }));
     expect(() => normalizeBaseUrl("ftp://host.example")).toThrow(AuthError);
+  });
+
+  // The gate that decides whether a token may cross the network in clear text: pin both sides.
+  it.each([
+    ["http://localhost", "http://localhost"],
+    ["http://localhost:8080", "http://localhost:8080"],
+    ["http://[::1]:8080", "http://[::1]:8080"],
+    ["http://127.0.0.1", "http://127.0.0.1"],
+    ["http://127.1.2.3", "http://127.1.2.3"],
+  ])("accepts plain http to loopback: %s", (input, expected) => {
+    expect(normalizeBaseUrl(input)).toBe(expected);
+  });
+
+  it.each([
+    ["http://127.0.0.1.evil.example", "insecure"],
+    ["http://localhost.evil.example", "insecure"],
+    ["http://evil.example/127.0.0.1", "insecure"],
+    ["http://[::2]", "insecure"],
+    ["http://0.0.0.0", "insecure"],
+    ["http://127.0.0.1@evil.example", "usage"], // refused for the userinfo first, refused either way
+  ])("refuses plain http to a host that only looks like loopback: %s", (input, kind) => {
+    expect(() => normalizeBaseUrl(input)).toThrow(expect.objectContaining({ kind }));
   });
 });
