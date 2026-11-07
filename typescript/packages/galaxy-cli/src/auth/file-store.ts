@@ -14,18 +14,28 @@ export interface HostRecord extends LoginSummary {
 
 /**
  * `hosts.yml`: per-host login metadata, plus the token itself when the system keyring is
- * not used. The directory is 0700 and the file 0600, enforced on every write (and repaired,
- * with a warning, when an existing one is looser). Writes go to a temp file in the same
- * directory, are fsynced, then renamed over the target, so a crash never leaves a half file.
+ * not used. The name, the keying by host and the plaintext fallback are gh's; the key here is
+ * the whole base URL (see `normalizeBaseUrl`) because a Galaxy can live under a path prefix.
+ *
+ * The directory is 0700 and the file 0600, enforced on every write (and repaired, with a
+ * warning, when an existing one is looser), because the file can hold a bearer token that
+ * anyone able to read it could use as the user. Writes go to a temp file in the same directory
+ * (a rename is only atomic within one filesystem), are fsynced, then renamed over the target,
+ * so a crash never leaves a half file.
  *
  * Before every read or write the directory and `hosts.yml` are `lstat`ed and refused if they
- * are symlinks or belong to another user: the file holds a bearer token, and a link planted
- * by someone else in a shared or misconfigured home could redirect it, or make us trust
- * content they wrote. The temp file is created exclusively (`wx`) with mode 0600 and then
- * `fchmod`ed, because the umask can mask the creation mode but not the chmod.
+ * are symlinks or belong to another user: a link planted by someone else in a shared or
+ * misconfigured home could redirect our write (and a later chmod) to a file of their choosing,
+ * or make us trust content they wrote. The temp file is created exclusively (`wx`, so a
+ * planted file or link at that name makes `open` fail rather than being written through) with
+ * mode 0600 and then `fchmod`ed, because the umask can mask the creation mode but not the
+ * chmod: under a restrictive umask the file would otherwise get a mode narrower than 0600,
+ * and the rename carries the temp file's mode over.
  *
  * Read-modify-write is not locked across processes: two simultaneous logins can lose one
- * update. Logins are rare and interactive, so that is accepted.
+ * update. There are no refresh tokens, so this file is only written at login and logout, which
+ * are rare and interactive; that is why it is accepted. (gh serialises login, logout and
+ * refresh with a lock file.)
  */
 export class FileStore {
   constructor(
@@ -61,8 +71,9 @@ export class FileStore {
 
   private async readAll(): Promise<Record<BaseUrl, HostRecord>> {
     await this.assertSafe();
-    // Before the content is read, never after: a file others could read or write must not be
-    // trusted for longer than it takes to fix the mode.
+    // Mode first, content second: once the file is 0600 nobody else can change it between here
+    // and the parse. Whatever they wrote before is still in it, which is why a file owned by
+    // another user is refused outright by `assertSafe` and only a loose mode is repaired.
     await this.repairFileMode();
     let text: string;
     try {
@@ -78,6 +89,8 @@ export class FileStore {
       throw e;
     }
     if (!text.trim()) return {};
+    // A file that cannot be understood is an error, never an empty list: `put` starts from this
+    // read, so reading it as empty would overwrite it and lose every other login in it.
     let doc: unknown;
     try {
       doc = parseYaml(text);
@@ -101,6 +114,12 @@ export class FileStore {
     return out as Record<BaseUrl, HostRecord>;
   }
 
+  /**
+   * Check every field rather than cast: a hand-edited or truncated file must fail naming the
+   * entry, not surface later as a `TypeError`, or as a file login with no token. An `expires_at`
+   * that is a string but not a date is let through here and judged by `checkExpiry`, which
+   * treats it as expired.
+   */
   private decode(url: string, raw: unknown): HostRecord {
     if (!isObject(raw)) throw this.corrupt(`entry for ${url} is not a mapping`);
     const str = (k: string): string => {
@@ -134,12 +153,17 @@ export class FileStore {
     return rec;
   }
 
+  /** The messages built here carry the path and a position, never file content: it holds tokens. */
   private corrupt(why: string): Error {
     return new Error(
       `${this.path} is not valid (${why}). Fix or delete it, then log in again; it has not been modified.`,
     );
   }
 
+  /**
+   * The token is written only for `storage: file`, so a record that points at the keyring can
+   * never leave a stale plaintext copy behind when a login moves there.
+   */
   private encode(all: Record<BaseUrl, HostRecord>): string {
     const hosts: Record<string, unknown> = {};
     for (const [url, r] of Object.entries(all)) {
@@ -160,6 +184,8 @@ export class FileStore {
   private async writeAll(all: Record<BaseUrl, HostRecord>): Promise<void> {
     await this.assertSafe();
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    // Again, because the first pass skips what does not exist yet: this one checks the
+    // directory `mkdir` just made, or found.
     await this.assertSafe();
     const dirMode = (await stat(this.dir)).mode & 0o777;
     if (dirMode & 0o077) {
@@ -168,7 +194,8 @@ export class FileStore {
     }
     await this.removeStaleTemps();
     const tmp = join(dirname(this.path), `.hosts.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
-    // 'wx' + 0600 so the secret is never briefly readable under a looser umask.
+    // 'wx' + 0600 so the secret is never briefly readable under a looser umask. The pid and the
+    // random part keep two writers off each other's temp file; `removeStaleTemps` matches the name.
     const fh = await open(tmp, "wx", 0o600);
     try {
       await fh.writeFile(this.encode(all), "utf8");
@@ -199,7 +226,12 @@ export class FileStore {
     }
   }
 
-  /** Refuse a config directory or `hosts.yml` that is a symlink, the wrong kind, or someone else's. */
+  /**
+   * Refuse a config directory or `hosts.yml` that is a symlink, the wrong kind, or someone
+   * else's. Only the last component of each path is looked at, so a symlinked parent of the
+   * directory is accepted. A loose mode is repaired elsewhere with a warning; ownership is
+   * refused here, because a file that belongs to another user is not ours to fix.
+   */
   private async assertSafe(): Promise<void> {
     for (const [what, p, kind] of [
       ["directory", this.dir, "dir"],

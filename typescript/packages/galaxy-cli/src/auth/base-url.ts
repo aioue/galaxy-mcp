@@ -5,20 +5,34 @@ import { AuthError, type BaseUrl } from "./types";
  *
  * A bare host is taken as https. The path prefix is kept, because a Galaxy can be served
  * under one (`https://example.org/galaxy`) and two prefixes on one host are two Galaxies.
- * Query, fragment and trailing slashes are dropped, the host is lower-cased by URL itself,
- * and default ports vanish the same way.
+ * Query, fragment and trailing slashes are dropped, and `URL` itself lower-cases the host,
+ * punycodes an IDN host and drops a default port, so `HOST.Example:443/` and `host.example`
+ * are one key.
  *
  * Trailing `/api` segments are dropped too, however many: people paste the API root, and
  * `https://x/api` and `https://x` are the same Galaxy. Stripping them all keeps the result a
  * fixed point (`normalizeBaseUrl(normalizeBaseUrl(u)) === normalizeBaseUrl(u)`), which matters
- * because the result is a credential key and `resolveHost` normalises a stored key again.
- * A segment that merely contains `api` (`/apiary`) is a different Galaxy and stays. Control
- * characters and whitespace anywhere in the URL are refused rather than trimmed (a stray
- * `\r` from a CRLF file would otherwise quietly become a different key), and comparison is
- * always exact, never by prefix.
+ * because the result is a credential key and `resolveHost` normalises a stored key again: with
+ * one `/api` stripped per pass, `.../api/api` would be stored under one key and looked up by
+ * `logout` and `status` under another. A segment that merely contains `api` (`/apiary`) is a
+ * different Galaxy and stays.
+ *
+ * Operations (`config.ts`) compare `normalizeBaseUrl(url) === login.baseUrl` and send the key
+ * to the stored form, so `GALAXY_URL=https://X/api/` finds the login made with `--host x`.
+ * The Python server's `normalize_galaxy_url` refuses the same schemes, credentials, whitespace
+ * and control characters; it refuses a query or fragment where this drops them, and has no
+ * https default or `/api` stripping.
+ *
+ * Control characters are refused before anything is trimmed, so a stray `\r` from a CRLF file
+ * or an ESC byte is an error rather than a quietly repaired key; only spaces around the URL
+ * are trimmed, and whitespace inside it is refused. Comparison is
+ * always exact, never by prefix. Credentials in the URL are refused because the URL is both
+ * stored as the key and printed in messages, so `https://user:pw@host` would persist the
+ * password and echo it.
  *
  * Plain http is refused except to loopback: a token sent in the clear is a token handed
- * out, and the only honest use for http here is a Galaxy on this machine.
+ * out to anyone on the path, and the only honest use for http here is a Galaxy on this
+ * machine.
  */
 export function normalizeBaseUrl(input: string): BaseUrl {
   // eslint-disable-next-line no-control-regex
@@ -47,6 +61,12 @@ export function normalizeBaseUrl(input: string): BaseUrl {
   return `${url.protocol}//${url.host}${path}` as BaseUrl;
 }
 
+/**
+ * Whether `hostname` (as `URL` reports it, brackets and all) is this machine: `localhost`,
+ * `::1`, or anything in `127.0.0.0/8`. Anchored on purpose, because a lookalike such as
+ * `127.0.0.1.example.org` or `localhost.example.org` is somebody else's server and would
+ * otherwise be trusted with a token in the clear. `0.0.0.0` is not loopback either.
+ */
 export function isLoopback(hostname: string): boolean {
   const h = hostname.replace(/^\[|\]$/g, "");
   return h === "localhost" || h === "::1" || /^127(\.\d{1,3}){3}$/.test(h);

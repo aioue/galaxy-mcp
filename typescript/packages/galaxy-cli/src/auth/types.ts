@@ -14,10 +14,17 @@ export const CLIENT_ID = "galaxy-cli";
  * A Galaxy's base URL in the form logins are keyed by: scheme, host, port and path
  * prefix, without a trailing slash or query (`https://usegalaxy.org`,
  * `https://example.org/galaxy`). Produced by `normalizeBaseUrl`; never compared raw.
+ *
+ * The brand is there so the compiler refuses a plain string where a key is wanted: a URL that
+ * skipped normalisation (`https://X/api/`) would otherwise become a second login for the same
+ * Galaxy, or miss the one that exists.
  */
 export type BaseUrl = string & { readonly __brand: "BaseUrl" };
 
-/** Where a token is kept. `file` is the plaintext fallback, readable only by the owner. */
+/**
+ * Where a token is kept. `file` is the plaintext fallback, readable only by the owner: gh falls
+ * back to its `hosts.yml` the same way, and like gh's `--insecure-storage` it can also be chosen.
+ */
 export type StorageKind = "keyring" | "file";
 
 /** How a token was obtained, which decides whether `logout` can revoke it on the server. */
@@ -49,12 +56,19 @@ export interface PutResult {
 }
 
 export interface CredentialStore {
-  /** The login for this Galaxy, or null if there is none. Never throws for "not found". */
+  /**
+   * The login for this Galaxy, or null if there is no record of one. A record whose token
+   * cannot be fetched (the keyring is down, or has lost the secret) rejects instead of
+   * returning null: that is a login we cannot use, not "no login", and callers must not read
+   * it as a clean slate.
+   */
   get(baseUrl: BaseUrl): Promise<(StoredLogin & { storage: StorageKind }) | null>;
   /**
    * Store or replace the login for `login.baseUrl`. `insecureStorage` skips the keyring.
    * `requireKeyring` forbids the plaintext fallback: with no working keyring, nothing is
-   * stored and the call rejects with an `AuthError` (used for admin tokens).
+   * stored and the call rejects with `AuthError("denied")`. It is set for admin tokens, which
+   * carry full, unscoped admin power (see `WhoAmI`), so a plaintext copy has to be asked for by
+   * name with `insecureStorage` and never arrives by fallback.
    */
   put(login: StoredLogin, opts?: { insecureStorage?: boolean; requireKeyring?: boolean }): Promise<PutResult>;
   /** Remove the login for this Galaxy from every place it is kept. Returns false if there was none. */
@@ -97,10 +111,23 @@ export interface AuthServer {
   revoke(token: string): Promise<void>;
 }
 
+/**
+ * Why an auth command failed. `exitCodeForAuthError` (`exit.ts`) turns each into a sysexits.h
+ * code: `usage` and `ambiguous_host` are 64 (EX_USAGE: the command line is wrong or does not
+ * say enough), `network` is 69 (EX_UNAVAILABLE), `unsupported`, `protocol` and `insecure` are 76
+ * (EX_PROTOCOL: the server reached does not speak what this needs), and `not_logged_in`,
+ * `denied` and `expired` are 77 (EX_NOPERM: there is no permission to do this).
+ */
 export type AuthErrorKind =
-  /** The Galaxy publishes no OAuth metadata, or has the device flow switched off. */
+  /**
+   * The Galaxy publishes no OAuth metadata, or has the device flow switched off. Also what
+   * `CombinedStore.delete` throws when the keyring will not confirm a secret is gone.
+   */
   | "unsupported"
-  /** The user denied the request on the approval page. */
+  /**
+   * The user denied the request on the approval page, or `put` refused to keep an admin token
+   * in the plaintext file (`requireKeyring`).
+   */
   | "denied"
   /** The user code expired before anyone approved it. */
   | "expired"
@@ -159,8 +186,9 @@ export interface AuthDeps {
   /**
    * Which Galaxy a command means: `--host`/`--url`, `GALAXY_URL` (env, then `.env`), the
    * `--profile` URL, then the only stored login (see `pickHost`). With `purpose: "login"` the
-   * `.env` and profile are never consulted. Rejects with `AuthError("ambiguous_host")` listing the stored hosts when
-   * several are stored and none was named, and `AuthError("usage")` when none is stored.
+   * `.env` and profile are never consulted, so a repository cannot choose where a key goes.
+   * Rejects with `AuthError("ambiguous_host")` listing the stored hosts when several are stored
+   * and none was named, and `AuthError("usage")` when none is stored.
    */
   resolveHost(explicit?: string, purpose?: "login"): Promise<BaseUrl>;
   /**

@@ -7,7 +7,10 @@ import { AuthError, type BaseUrl, type CredentialStore, type LoginSummary, type 
 /**
  * Metadata always lives in `hosts.yml`; the token lives in the system keyring when that
  * works, else in `hosts.yml` too (with a warning). The metadata's `storage` field says
- * which, so `get` never has to guess.
+ * which, so `get` never has to guess, and a login kept in the file never touches the keyring.
+ * It is the split gh makes, with the same plaintext fallback and an `--insecure-storage` of
+ * the same name. What is added here: a keyring write must read back, and an admin token never
+ * falls back to the file on its own.
  */
 export class CombinedStore implements CredentialStore {
   constructor(
@@ -24,6 +27,8 @@ export class CombinedStore implements CredentialStore {
     try {
       token = await this.keyring.get(baseUrl, rec.username);
     } catch (e) {
+      // `not_logged_in` (exit 77): the record exists but its token cannot be reached, which for
+      // whoever is asking comes to the same thing as having no login.
       throw new AuthError("not_logged_in", `The token for ${baseUrl} is in the system keyring, which is not available: ${(e as Error).message}`, { cause: e });
     }
     // The record says the token is in the keyring and it is not there: that is a login we
@@ -39,6 +44,7 @@ export class CombinedStore implements CredentialStore {
 
   async put(login: StoredLogin, opts: { insecureStorage?: boolean; requireKeyring?: boolean } = {}): Promise<PutResult> {
     const { token, ...summary } = login;
+    // Read first: what the old record points at decides what must be cleaned up afterwards.
     const prior = await this.file.get(login.baseUrl);
     let storage: StorageKind = "file";
     let warning: string | undefined;
@@ -59,12 +65,16 @@ export class CombinedStore implements CredentialStore {
         }
         if (opts.requireKeyring) {
           // Nothing has been written to the file yet (it is only touched below), so refusing is clean.
+          // `denied` is exit 77 (EX_NOPERM): the store declined by policy, nothing else broke. An
+          // admin token is the one credential never left in plaintext as a side effect.
           throw new AuthError(
             "denied",
             `No system keyring here, so nothing was stored. Rerun with --insecure-storage to keep it in ${this.file.path} (readable only by you), or use GALAXY_API_KEY for this session.`,
             { cause: e },
           );
         }
+        // Said aloud, never silent: a fallback nobody hears about is a plaintext token that the
+        // user believes is in the keyring.
         warning = `No system keyring available; token saved in plain text at ${this.file.path} (readable only by you)`;
       }
     }
@@ -110,6 +120,7 @@ export class CombinedStore implements CredentialStore {
     return true;
   }
 
+  /** Reads `hosts.yml` only, so `status` and host resolution still work when the keyring is wedged. */
   async list(): Promise<LoginSummary[]> {
     return (await this.file.list()).map(({ token: _token, ...s }) => s);
   }
@@ -117,7 +128,9 @@ export class CombinedStore implements CredentialStore {
 
 /**
  * The real store, the only one: config dir from the environment, the native keyring unless
- * `GXY_NO_KEYRING` is set (to anything but "", "0" or "false").
+ * `GXY_NO_KEYRING` is set (to anything but "", "0" or "false"). One factory, so the auth
+ * commands and operations (`config.ts`) cannot disagree about where logins live. Warnings go to
+ * stderr, because stdout carries only what a pipe or `eval` may read.
  */
 export function createCredentialStore(
   env: Record<string, string | undefined> = process.env,
