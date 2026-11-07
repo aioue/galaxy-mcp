@@ -77,6 +77,15 @@ A token that carries admin rights is only ever stored in the system keyring. Wit
 | `GXY_OAUTH_CLIENT_ID` | The OAuth client id presented to the Galaxy during login (default `galaxy-cli`), for a Galaxy that registers clients by name |
 | `GXY_NO_KEYRING` | `1` never touches the system keyring: tokens go to `hosts.yml`, with a warning. Use it on a box whose keyring is broken or locked, to skip the wait |
 
+Behind a proxy, set `NODE_USE_ENV_PROXY=1` along with `HTTPS_PROXY` (and `NO_PROXY` for a Galaxy on
+your own network). Node's `fetch` ignores the proxy variables without it, and reads it only at
+startup, so it has to be in the environment before `gxy` runs. It needs Node 22.21+ or 24+. If a network error happens while a proxy variable is set and the flag is not, `gxy`
+says so.
+
+```bash
+NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://proxy.example.org:3128 NO_PROXY=localhost gxy auth login --host https://dev.galaxy.example.org
+```
+
 A login counts as expired a minute before its expiry time, so a token that passes `auth token`
 has time to do its job. If the keyring cannot be read, `auth logout` still removes the stored
 record (it says the token was not revoked and may remain valid until it expires) and `auth status`
@@ -129,8 +138,8 @@ in the config file:
 ### Certificates and proxies
 
 For a Galaxy with a certificate from a private CA, set `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`.
-Node's `fetch` ignores `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` is set (Node 22.21 and
-later). Login never offers to switch off certificate checks.
+Node's `fetch` ignores `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` is set (Node 22.21+ or 24+;
+see the proxy note under the auth variables). Login never offers to switch off certificate checks.
 
 ## Documentation
 

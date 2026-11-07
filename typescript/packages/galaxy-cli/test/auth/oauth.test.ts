@@ -46,13 +46,13 @@ describe("discover", () => {
     expect((await authErrorOf(discover(url()))).kind).toBe(kind);
   });
 
-  it("is a network error, naming the proxy and CA settings, when nothing is listening", async () => {
+  it("is a network error, naming the CA setting and not the proxy, when nothing is listening", async () => {
     const dead = await startFakeGalaxy();
     const deadUrl = dead.baseUrl as BaseUrl;
     await dead.close();
     const e = await authErrorOf(discover(deadUrl));
     expect(e.kind).toBe("network");
-    expect(e.message).toContain("NODE_USE_ENV_PROXY=1");
+    expect(e.message).not.toContain("NODE_USE_ENV_PROXY");
     expect(e.message).toContain("NODE_EXTRA_CA_CERTS");
   });
 });
@@ -278,7 +278,7 @@ describe("network and TLS errors name the fixes", () => {
     expect(e.kind).toBe("network");
     expect(e.message).toContain("self-signed certificate");
     expect(e.message).toContain("NODE_EXTRA_CA_CERTS");
-    expect(e.message).toContain("NODE_USE_ENV_PROXY=1");
+    expect(e.message).not.toContain("NODE_USE_ENV_PROXY");
     expect(e.message).not.toMatch(/NODE_TLS_REJECT_UNAUTHORIZED|insecure|--no-verify|disable/i);
   });
 });

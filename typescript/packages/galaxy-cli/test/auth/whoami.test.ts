@@ -104,13 +104,13 @@ describe("version probe before the token is sent", () => {
 });
 
 describe("network and TLS failures", () => {
-  it("an unreachable host is a network error naming the proxy and CA settings", async () => {
+  it("an unreachable host is a network error naming the CA setting and not the proxy", async () => {
     const dead = await startFakeGalaxy();
     const url = dead.baseUrl as BaseUrl;
     await dead.close();
     const e = await authErrorOf(probeGalaxy(url));
     expect(e.kind).toBe("network");
-    expect(e.message).toContain("NODE_USE_ENV_PROXY");
+    expect(e.message).not.toContain("NODE_USE_ENV_PROXY");
     expect(e.message).toContain("NODE_EXTRA_CA_CERTS");
   });
 
@@ -118,7 +118,7 @@ describe("network and TLS failures", () => {
     const e = await authErrorOf(probeGalaxy("https://galaxy.example.org" as BaseUrl, tlsFailure));
     expect(e.kind).toBe("network");
     expect(e.message).toContain("NODE_EXTRA_CA_CERTS");
-    expect(e.message).toContain("NODE_USE_ENV_PROXY");
+    expect(e.message).not.toContain("NODE_USE_ENV_PROXY");
   });
 
   it("a certificate failure in the user lookup names NODE_EXTRA_CA_CERTS", async () => {
@@ -126,7 +126,7 @@ describe("network and TLS failures", () => {
     expect(e.kind).toBe("network");
     expect(e.message).toContain("self-signed certificate");
     expect(e.message).toContain("NODE_EXTRA_CA_CERTS");
-    expect(e.message).toContain("NODE_USE_ENV_PROXY");
+    expect(e.message).not.toContain("NODE_USE_ENV_PROXY");
   });
 });
 

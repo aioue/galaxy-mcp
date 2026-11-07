@@ -25,9 +25,8 @@ export function isTlsError(err: Error): boolean {
  * The message for a request that never got an answer, naming the fixes that exist.
  *
  * A certificate failure usually means a private CA (set `NODE_EXTRA_CA_CERTS` to its PEM
- * file) and a refused or timed-out connection often means a proxy Node's `fetch` is not
- * using: it ignores `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` (Node 22.21 or later). The
- * advice never includes turning certificate checking off.
+ * file). The proxy advice is not here: it depends on the environment, so `fail` in
+ * commands/common.ts adds it. The advice never includes turning certificate checking off.
  */
 export function describeNetworkError(err: Error, target: string): string {
   const cause = rootCause(err);
@@ -35,13 +34,8 @@ export function describeNetworkError(err: Error, target: string): string {
   if (isTlsError(err)) {
     return (
       `Could not make a secure connection to ${target}: ${detail}. ` +
-      "If it uses a certificate from a private CA, set NODE_EXTRA_CA_CERTS to the CA's PEM file and try again. " +
-      "If you reach the internet through a proxy, note that Node ignores HTTPS_PROXY unless NODE_USE_ENV_PROXY=1 is set (Node 22.21 or later)."
+      "If it uses a certificate from a private CA, set NODE_EXTRA_CA_CERTS to the CA's PEM file and try again."
     );
   }
-  return (
-    `Could not reach ${target}: ${detail}. ` +
-    "If you reach the internet through a proxy, note that Node ignores HTTPS_PROXY unless NODE_USE_ENV_PROXY=1 is set (Node 22.21 or later); " +
-    "for a private CA, set NODE_EXTRA_CA_CERTS."
-  );
+  return `Could not reach ${target}: ${detail}. For a private CA, set NODE_EXTRA_CA_CERTS.`;
 }
