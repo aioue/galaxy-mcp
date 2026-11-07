@@ -1,7 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { spawn } from "node:child_process";
+import { access, chmod, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { SPAWN_TIMEOUT_MS, canOpenBrowser, openBrowser } from "../../src/auth/browser";
+import { useTempDir } from "./harness";
 
 function fakeSpawn(outcome: "spawn" | "error" | "throw") {
   const calls: { cmd: string; args: string[]; opts: unknown }[] = [];
@@ -105,5 +108,46 @@ describe("$BROWSER", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// The fake `spawn` tests above prove what is handed to `spawn`. These run a real launcher, so they
+// prove what the operating system hands it: the URL arrives as one argv entry, and no shell
+// ever sees it.
+describe.skipIf(process.platform === "win32")("a real $BROWSER launcher", () => {
+  const tmp = useTempDir("gxy-browser-");
+
+  /** A launcher that writes its argument count, then its arguments one per line, to `argv.txt`. */
+  async function stub(): Promise<{ path: string; argvFile: string; readArgv: () => Promise<string[]> }> {
+    const path = join(tmp.path, "stub-browser");
+    const argvFile = join(tmp.path, "argv.txt");
+    await writeFile(path, `#!/bin/sh\nprintf '%s\\n' "$#" "$@" > "${argvFile}.part" && mv "${argvFile}.part" "${argvFile}"\n`);
+    await chmod(path, 0o755);
+    // The launcher is detached and `openBrowser` resolves when it starts, not when it finishes.
+    const readArgv = async () => {
+      await vi.waitFor(() => access(argvFile), { timeout: 5000, interval: 20 });
+      return (await readFile(argvFile, "utf8")).split("\n").slice(0, -1);
+    };
+    return { path, argvFile, readArgv };
+  }
+
+  /** A URL with every character a shell would act on. Running it through a shell would create `pwned-*`. */
+  const evilUrl = () => `https://x.example/?q=a b&c=$(touch ${tmp.path}/pwned-sub);d=\`touch ${tmp.path}/pwned-tick\`;touch ${tmp.path}/pwned-semi`;
+  const pwned = async () => (await Promise.all(["sub", "tick", "semi"].map((n) => access(join(tmp.path, `pwned-${n}`)).then(() => n, () => null)))).filter(Boolean);
+
+  it("receives the URL as exactly one argument, with nothing run by a shell", async () => {
+    const s = await stub();
+    const url = evilUrl();
+    expect(await openBrowser(url, { BROWSER: s.path }, "linux")).toBe(true);
+    expect(await s.readArgv()).toEqual(["1", url]);
+    expect(await pwned()).toEqual([]);
+  });
+
+  it("with %s, receives its own arguments and then the URL as one more", async () => {
+    const s = await stub();
+    const url = evilUrl();
+    expect(await openBrowser(url, { BROWSER: `${s.path} --new-tab %s` }, "linux")).toBe(true);
+    expect(await s.readArgv()).toEqual(["2", "--new-tab", url]);
+    expect(await pwned()).toEqual([]);
   });
 });
