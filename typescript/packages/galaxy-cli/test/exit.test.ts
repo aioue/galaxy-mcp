@@ -91,6 +91,9 @@ describe("credential errors exit by kind", () => {
     }
   }
 
+  // 77 is EX_NOPERM and 64 EX_USAGE, the same codes `auth` gives for not being logged in and for not
+  // saying which Galaxy (program.ts). Every other credential problem stays a usage error, as it was
+  // before stored logins existed.
   it("an expired login with no other key exits 77, saying when it expired and how to renew it", async () => {
     const r = await run(host("https://galaxy.example.org", "2020-01-01T00:00:00.000Z"));
     expect(r.exitCode).toBe(77);

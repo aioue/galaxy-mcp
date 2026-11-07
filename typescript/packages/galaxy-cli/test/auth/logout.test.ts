@@ -23,6 +23,8 @@ describe("auth logout", () => {
     expect(h.cap.err).not.toContain(FAKE_TOKEN);
   });
 
+  // Local removal does not wait on the server: a Galaxy that is down is when a person most needs
+  // the stored login gone. The token then stays valid until it expires, and the message says so.
   it.each([
     ["revocation fails", (h: ReturnType<typeof harness>) => void (h.server.revokeError = new AuthError("network", "connection refused")), "connection refused"],
     ["discovery fails", (h: ReturnType<typeof harness>) => void (h.knobs.discoverError = new AuthError("network", "no route")), "no route"],
@@ -46,7 +48,12 @@ describe("auth logout", () => {
 
   it("deletes a pasted key without contacting the server and says it was not revoked", async () => {
     const h = harness({ stored: [fakeLogin({ method: "pasted", scopes: [], expiresAt: null })] });
-    // Discovery works, so a logout that tried to revoke would get as far as the server.
+    // Only a device token is revoked. A pasted key is not an OAuth token, and logout says to manage
+    // it in Galaxy's user preferences instead.
+    // Discovery succeeds here, and its calls are counted. An earlier version made discovery throw,
+    // and that could not fail: logout treats a throw as "could not revoke", never prints that for a
+    // pasted key, and nothing is revoked when discovery throws. So a logout that did try to revoke
+    // a pasted key passed it. Counting the calls to a discovery that works is what can fail.
     let discovered = 0;
     const discover = h.deps.discover;
     h.deps.discover = async (...args) => (discovered++, discover(...args));
@@ -67,6 +74,8 @@ describe("auth logout", () => {
     expect(h.cap.err).toContain("store is broken");
   });
 
+  // Reading the token is only needed to revoke it, and must not stand between the person and
+  // removing the record: the keyring may be down or the secret gone, which is when cleaning up matters most.
   describe("when the token cannot be read", () => {
     it.each(["throw", "null"] as const)("skips revocation, removes the record and says what happened (%s)", async (how) => {
       const h = harness({ stored: [fakeLogin()] });
@@ -96,6 +105,8 @@ describe("auth logout", () => {
   });
 });
 
+// The real store over a real `hosts.yml` and a fake keyring, because what logout must leave behind
+// (no token in the keyring, none in the file) is what the real store does, not what a fake store says.
 describe("logout with the Galaxy down, over the real store", () => {
   const tmp = useTempDir("gxy-lo-");
   let keyring: FakeKeyring;
@@ -132,6 +143,8 @@ describe("logout with the Galaxy down, over the real store", () => {
     expect(await readFile(file.path, "utf8")).not.toContain(fakeLogin().token);
   });
 
+  // The record goes either way, and the failure is reported rather than swallowed: a secret that
+  // may remain in the keyring is something the person must know, so the exit is not 0.
   it("says the secret may remain, and exits 1, when the keyring will not confirm the delete", async () => {
     await store.put(fakeLogin());
     keyring.mode = "undeletable";

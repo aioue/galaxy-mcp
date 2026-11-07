@@ -1,3 +1,8 @@
+/**
+ * The OAuth client against the fake Galaxy over a real socket: what it asks for, what it refuses
+ * and how it classifies what comes back. How it waits, and how it is cancelled, is in
+ * oauth-polling.test.ts.
+ */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { discover } from "../../src/auth/oauth";
 import { CLIENT_ID, type AuthServer, type BaseUrl } from "../../src/auth/types";
@@ -36,6 +41,9 @@ describe("discover", () => {
     expect((await authErrorOf(server.revoke("fake-access-token-1"))).kind).toBe("unsupported");
   });
 
+  // `unsupported` is what login turns into the hint to paste a key instead. Broken metadata
+  // (`protocol`) and metadata for another issuer (`insecure`, RFC 8414 §3.3) are not a Galaxy that
+  // merely lacks the feature, so they get no such hint (login.test.ts).
   it.each([
     ["404 (what Galaxy 26.1 sends)", "not-found", "unsupported"],
     ["a page that is not JSON", "not-json", "unsupported"],
@@ -70,6 +78,9 @@ describe("a Galaxy under a path prefix", () => {
   });
 });
 
+// Polling sends the device code to the token endpoint and logout sends the token to the revocation
+// endpoint, so metadata that points any of the three at another origin is refused before anything
+// is sent (oauth.ts).
 describe("endpoints must be on the issuer's origin", () => {
   beforeEach(async () => {
     galaxy = await start();
@@ -110,6 +121,8 @@ describe("device login", () => {
     expect(grant).toEqual({ accessToken: galaxy.issuedTokens()[0], expiresIn: 1800, scopes: ["read"] });
   });
 
+  // The client is public: it holds no secret and says so, so there is nothing to leak to a server
+  // that asks for one.
   it("sends the public client id and scope, and no secret or Authorization header", async () => {
     const server = await discover(url());
     const pending = await server.startDeviceLogin(["read", "write"]);
@@ -128,6 +141,7 @@ describe("device login", () => {
     }
   });
 
+  // No `scope` parameter at all, not an empty one, is how the client asks for the server's default.
   it("sends scope only when scopes are given", async () => {
     const server = await discover(url());
     await server.startDeviceLogin();
@@ -141,6 +155,7 @@ describe("device login", () => {
     expect(galaxy.requestsTo("/oauth/device_authorization")[0]!.form.client_id).toBe("other-client");
   });
 
+  // RFC 6749 §5.1: a server omits `scope` when it granted what was requested, so absence is not "none".
   it("falls back to the requested scopes when the response has no scope, and has no expiry without expires_in", async () => {
     const server = await discover(url());
     const pending = await server.startDeviceLogin(["read"]);
@@ -181,6 +196,9 @@ describe("device login", () => {
   });
 });
 
+// A token goes into an HTTP header and, for `auth env`, into a shell (token-shape.ts), so one with
+// whitespace, control characters or non-ASCII is a broken response or a hostile one. It is refused
+// without being quoted back, because it is a secret and not one that can be used.
 describe("the token Galaxy issues", () => {
   beforeEach(async () => {
     galaxy = await start();
@@ -212,6 +230,7 @@ describe("revocation", () => {
     galaxy = await start();
   });
 
+  // RFC 7009 §2.1: a form post carrying `token` and `token_type_hint`; a public client sends no credentials.
   it("sends the token as a form post to the revocation endpoint, with no Authorization header", async () => {
     const server = await discover(url());
     const token = galaxy.issueToken();
@@ -229,10 +248,10 @@ describe("revocation", () => {
 
 // What the OAuth client refuses or hides: redirects with credentials, plain http, hostile server text.
 
-
 describe("no request reaches another origin through a redirect", () => {
-  // `redirect()` makes the Galaxy answer the named path with a redirect to another origin,
-  // which stands for anything a hostile or misconfigured Galaxy could point at.
+  // A client that followed a redirect would carry the device code, the token or the key to an origin
+  // the person never chose. `redirect()` makes the Galaxy answer the named path with a redirect to
+  // another origin, which stands for anything a hostile or misconfigured Galaxy could point at.
   type Step = { galaxy: FakeGalaxy; server: AuthServer; redirect: () => void };
   const rows: [what: string, path: string, act: (s: Step) => Promise<unknown>][] = [
     ["the metadata", "/.well-known/oauth-authorization-server", ({ galaxy, redirect }) => (redirect(), discover(galaxy.baseUrl as BaseUrl))],
@@ -260,6 +279,7 @@ describe("no request reaches another origin through a redirect", () => {
 });
 
 describe("plain http", () => {
+  // A token would cross the network unencrypted. The spy shows that the refusal comes before any request.
   it("is refused to a non-loopback host without making a request", async () => {
     const fetchSpy = vi.fn<typeof fetch>();
     const e = await authErrorOf(discover("http://galaxy.example.org" as BaseUrl, { fetch: fetchSpy }));
@@ -269,6 +289,8 @@ describe("plain http", () => {
 });
 
 describe("network and TLS errors name the fixes", () => {
+  // The fix named for a private CA is to trust it. Turning verification off is never suggested: it
+  // is the check that protects the token this connection is about to carry.
   it("a certificate failure names NODE_EXTRA_CA_CERTS and never suggests turning verification off", async () => {
     const cause = Object.assign(new Error("self-signed certificate in certificate chain"), { code: "SELF_SIGNED_CERT_IN_CHAIN" });
     const failing = (async () => {
@@ -284,6 +306,8 @@ describe("network and TLS errors name the fixes", () => {
 });
 
 describe("server text in errors is sanitised", () => {
+  // Server text reaches the person's terminal, and a terminal acts on escape sequences: this
+  // response tries to retitle the window and clear the screen from inside an error message.
   it("strips terminal control characters from an OAuth error and its description", async () => {
     const galaxy = await start();
     galaxy.setDeviceAuthorizationOverride({

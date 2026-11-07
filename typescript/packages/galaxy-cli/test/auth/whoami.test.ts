@@ -1,3 +1,8 @@
+/**
+ * `whoami`, the live check of a token, against the fake Galaxy over a real socket: what it counts as
+ * a user, how it tells a bad token from a bad address or a Galaxy that is down, and that nothing
+ * reaches the key before the address is shown to be a Galaxy.
+ */
 import { beforeEach, describe, expect, it } from "vitest";
 import { createWhoami, probeGalaxy } from "../../src/auth/whoami";
 import { discover } from "../../src/auth/oauth";
@@ -32,10 +37,13 @@ describe("whoami", () => {
   });
 
   it("refuses the anonymous record Galaxy answers with 200 for a key it does not know", async () => {
-    // Observed on Galaxy 26.1: 200 and no `username`.
+    // Observed on Galaxy 26.1: 200 and no `username`. A status code alone says nothing here, so
+    // success means a record with a real user in it (whoami.ts).
     expect((await authErrorOf(createWhoami()(base(), "not-a-real-token"))).kind).toBe("not_logged_in");
   });
 
+  // A refusal says the token is bad and a 5xx says Galaxy is down. The next two are neither, and are
+  // named for what they are: otherwise a person re-creates a good key for nothing.
   it.each([
     ["a 403", 403, "not_logged_in"],
     ["a 401", 401, "not_logged_in"],
@@ -67,6 +75,8 @@ describe("whoami", () => {
     expect(galaxy.requestsTo("/api/users/current")).toHaveLength(0);
   });
 
+  // The key travels in a header, so a client that followed a redirect would hand it to whatever origin
+  // the redirect named.
   it("never gives the key to the origin a Galaxy redirects to", async () => {
     const elsewhere = await start();
     galaxy.setRedirect("/api/users/current", `${elsewhere.baseUrl}/api/users/current`);
@@ -75,6 +85,10 @@ describe("whoami", () => {
   });
 });
 
+// Before any key is sent, an anonymous `GET /api/version` shows the address is a Galaxy's API. A wrong
+// address often redirects (http to https, a missing path prefix), and a Galaxy behind a `remote_user`
+// proxy answers an HTML login page: sending the key along would hand it to whatever answers. Each
+// refusal here also shows that no `/api/users/current` request, which carries the key, was made.
 describe("version probe before the token is sent", () => {
   it("runs once per Galaxy, anonymously", async () => {
     const token = galaxy.issueToken();
@@ -130,6 +144,8 @@ describe("network and TLS failures", () => {
   });
 });
 
+// So a Galaxy admin can tell `gxy` from a browser in their logs (user-agent.ts). The expected value is
+// built from package.json, not from the constant under test, so a change to the string's shape fails.
 describe("User-Agent", () => {
   it("is gxy/<package version> (galaxy-cli) on whoami, the probe and every OAuth call", async () => {
     const token = galaxy.issueToken();

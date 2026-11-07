@@ -1,3 +1,7 @@
+/**
+ * The three commands whose job is to print the token: `token`, `env` and `headers`. On these,
+ * stdout carries the secret and stderr carries every message about it.
+ */
 import { execFileSync } from "node:child_process";
 import { describe, it, expect } from "vitest";
 import { tokenCommand } from "../../src/auth/commands/token";
@@ -53,6 +57,10 @@ describe("auth token", () => {
   });
 });
 
+// Whoever runs these substitutes or parses stdout (`$(gxy auth token)`, `eval "$(gxy auth env)"`, Claude
+// Code reading `headers` as JSON), so when there is no token it must stay empty and the reason go to
+// stderr, with an exit code. Under a minute left counts as expired, the margin operations use too
+// (config.ts), since such a token would run out before the caller used it.
 describe.each(commands)("%s when there is nothing to hand out", (_name, run) => {
   it("exits 77 on stderr, with nothing on stdout, when not logged in", async () => {
     const h = harness();
@@ -94,6 +102,8 @@ describe.each(commands)("%s when there is nothing to hand out", (_name, run) => 
   });
 });
 
+// 64 is EX_USAGE: the caller did not say which Galaxy, and can. 76 is EX_PROTOCOL: an insecure
+// `--host` is refused for what it is, not reported as "not logged in", which is 77 (EX_NOPERM).
 describe("choosing the host", () => {
   it("exits 64, not 77, when several logins are stored and none is named", async () => {
     const h = harness({ stored: [fakeLogin(), fakeLogin({ baseUrl: OTHER })] });
@@ -130,6 +140,8 @@ describe("auth env", () => {
   });
 
   describe("quoting", () => {
+    // `auth env` output is meant to be evaluated, so a real `sh` is the judge here: the expectation
+    // comes from what sh makes of the quoting, not from the code that wrote it.
     it("survives a real sh, whatever the value holds", () => {
       const value = `it's "x" $HOME \`id\` \\ end`;
       expect(execFileSync("sh", ["-c", `printf %s ${quoteFor("sh", value)}`]).toString()).toBe(value);
@@ -140,6 +152,7 @@ describe("auth env", () => {
       expect(quoteFor("fish", `a'b\\c`)).toBe(`'a\\'b\\\\c'`);
     });
 
+    // PowerShell treats the curly single quotes as quote characters too, so each is doubled.
     it("doubles single quotes for PowerShell, curly ones included, and leaves double quotes alone", () => {
       expect(quoteFor("powershell", `a'b"c$d\`e`)).toBe(`'a''b"c$d\`e'`);
       for (const q of ["‘", "’", "‚", "‛"]) expect(quoteFor("powershell", `a${q}b`)).toBe(`'a${q}${q}b'`);
@@ -156,8 +169,9 @@ describe("auth headers", () => {
     expect(h.cap.err).toBe("");
   });
 
-  // Claude Code names the MCP server it is asking for headers for. A token must only go to
-  // the Galaxy that server is.
+  // Claude Code names the MCP server it is asking for headers for, in `CLAUDE_CODE_MCP_SERVER_URL`
+  // (headers.ts). A token must only go to the Galaxy that server is, so on any doubt the helper
+  // prints nothing and exits 77: Claude Code then has no headers, and no other server gets a token.
   describe("when CLAUDE_CODE_MCP_SERVER_URL names the server", () => {
     const MCP = "https://dev.galaxy.example.org/api/mcp";
     const two = (mcpUrl = MCP) =>
@@ -176,6 +190,8 @@ describe("auth headers", () => {
       expect(h.cap.out).toBe('{"x-api-key":"prefixed-fake-token"}\n');
     });
 
+    // The whole origin and path must match, so a host that merely begins the same, or a longer
+    // path, is not that Galaxy.
     it.each([
       ["another Galaxy", "https://evil.example/api/mcp"],
       ["a longer path", "https://dev.galaxy.example.org/galaxy/api/mcp"],
@@ -188,6 +204,8 @@ describe("auth headers", () => {
       expect(h.cap.err).not.toContain(FAKE_TOKEN);
     });
 
+    // With the server named, nothing else may choose the host: a fallback would hand the stored
+    // token to whatever server Claude Code was connecting to.
     it("does not fall back to GALAXY_URL or the only stored login", async () => {
       const h = harness({ stored: [fakeLogin()], hostFromEnv: "https://dev.galaxy.example.org", env: { CLAUDE_CODE_MCP_SERVER_URL: "https://evil.example/api/mcp" } });
       expect(await headersCommand({}, h.deps)).toBe(77);

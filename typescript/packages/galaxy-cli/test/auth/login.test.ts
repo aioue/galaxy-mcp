@@ -1,3 +1,8 @@
+/**
+ * `login` as a command, in process: fakes for the server, the store and the terminal, so every
+ * branch can be reached and each run's output read back. The one block that uses real discovery
+ * says so. The real binary, a real SIGINT and real terminals are in e2e.int.test.ts.
+ */
 import { describe, it, expect, vi } from "vitest";
 import { loginCommand } from "../../src/auth/commands/login";
 import { discover } from "../../src/auth/oauth";
@@ -17,6 +22,7 @@ describe("login (device flow)", () => {
     expect(h.cap.out).toBe("");
     expect(h.cap.err).toContain("WDJB-MJHT");
     expect(h.cap.err).toContain("https://dev.galaxy.example.org/login/device");
+    // RFC 8628 §5.4 (remote phishing): anyone can start a login and ask someone else to approve its code.
     expect(h.cap.err).toMatch(/only approve this code/i);
     expect(h.cap.err).toContain("Logged in to dev.galaxy.example.org as aioue");
     expect(h.cap.err).toMatch(/stored in the system keyring/);
@@ -56,6 +62,8 @@ describe("login (device flow)", () => {
     expect(h.store.logins.get(HOST)?.storage).toBe("file");
   });
 
+  // An explicit key beats a stored login for operations (config.ts), so a login stored now would
+  // quietly go unused. The warning says so, and never repeats the value.
   it("warns that GALAXY_API_KEY takes precedence, without printing it", async () => {
     const h = harness({ env: { GALAXY_API_KEY: "irrelevant" } });
     await loginCommand({ host: HOST_ARG }, h.deps);
@@ -78,6 +86,8 @@ describe("login (device flow)", () => {
       expect(await p).toBe(130);
     });
 
+    // Interactive means stdin and stderr are both terminals. Anything else (a pipe, a file) must
+    // not wait for Enter, and e2e.int.test.ts shows that on real streams.
     it.each([
       ["not interactive", { interactive: false }, {}],
       ["--no-browser is given", { interactive: true }, { browser: false }],
@@ -91,6 +101,9 @@ describe("login (device flow)", () => {
     });
   });
 
+  // Once the server has issued a token, one that cannot be checked or kept would stay valid (an
+  // admin's too) until it expires, with nothing local pointing at it. So login takes it back, and
+  // says what happened either way, since the person may have to revoke it by hand.
   describe("when something goes wrong", () => {
     it("stores nothing, exits 77 and takes the token back when Galaxy refuses it", async () => {
       const h = harness();
@@ -100,6 +113,8 @@ describe("login (device flow)", () => {
       expect(h.server.revoked).toEqual([FAKE_TOKEN]);
     });
 
+    // 77 is EX_NOPERM and 69 EX_UNAVAILABLE (exit.ts): being refused and not being able to ask stay
+    // different codes.
     it.each([
       ["denied", 77],
       ["network", 69],
@@ -160,6 +175,8 @@ describe("login (device flow)", () => {
     });
   });
 
+  // The host is shown before a key is read or a code is requested, so the person sees where it is
+  // going while they can still stop it (login.ts).
   describe("naming the Galaxy", () => {
     it("shows the host before a pasted key is read or sent", async () => {
       const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
@@ -197,6 +214,9 @@ describe("login (device flow)", () => {
       expect(h.store.putCalls[0]!.login.baseUrl).toBe(HOST);
     });
 
+    // Login never takes its host from `.env` or a profile (`pickHost`): a repository must not choose where
+    // your credentials go. When one names a different Galaxy, login says so, before "Logging in to",
+    // so the person is not left wondering why it went elsewhere.
     it("says so when .env names a different Galaxy than the one it uses", async () => {
       const h = harness({ hostFromEnv: HOST_ARG, ignoredLoginHost: { source: "dotenv", url: "https://other.example.org" } });
       expect(await loginCommand({}, h.deps)).toBe(0);
@@ -216,6 +236,10 @@ describe("login (device flow)", () => {
   });
 });
 
+// A Galaxy can lack device login in three ways: a 404 for its metadata, a page that is not JSON, or
+// metadata with no device endpoint. All three get one message and exit 76, EX_PROTOCOL, with the
+// hint to paste a key instead. Broken metadata and metadata for another issuer are different
+// faults, and get no such hint.
 describe("login against a Galaxy with no device login", () => {
   const galaxyOf = useFakeGalaxies();
 
@@ -251,6 +275,9 @@ describe("login against a Galaxy with no device login", () => {
   });
 });
 
+// The server picks the approval URL and the CLI prints and opens it, so a Galaxy behind a
+// misconfigured proxy must not be able to point people at another host (login.ts). The origin must
+// match exactly: host, port and scheme, and plain http only to loopback. 76 is EX_PROTOCOL.
 describe("the approval page must be on the Galaxy", () => {
   it.each([
     ["another host", "https://evil.example/login/device"],
@@ -279,6 +306,11 @@ describe("the approval page must be on the Galaxy", () => {
   });
 });
 
+// The caller hands `loginCommand` an `AbortSignal` (commands do not touch process signals), and
+// every step either takes it or is raced against it. Each test cancels at a different step, since
+// each is a different place to be left holding something: a code on the server, a token, a terminal
+// in raw mode. 130 is 128 plus SIGINT's 2, the shell's code for a Ctrl-C. A real SIGINT is in
+// e2e.int.test.ts.
 describe("cancelling with Ctrl-C", () => {
   const cancelled = (h: ReturnType<typeof harness>, code: number) => {
     expect(code).toBe(130);
@@ -471,6 +503,8 @@ describe("login --with-token", () => {
       expect(h.cap.err).not.toContain("Paste your Galaxy API key");
     });
 
+    // An API key is tens of characters (stdin.ts), so a pipe that is far larger is not one, and is
+    // refused before anything is sent to Galaxy.
     it("refuses more than 16 KiB with a usage error, before any whoami, without echoing it", async () => {
       const h = harness({ stdinText: "k".repeat(16 * 1024 + 1) });
       expect(await loginCommand({ host: HOST_ARG, withToken: true }, h.deps)).toBe(64);
@@ -481,7 +515,10 @@ describe("login --with-token", () => {
   });
 
   describe("at a terminal", () => {
-    /** A stdin that looks like a TTY and records raw mode. The terminal is restored when `raw` ends on false. */
+    /**
+     * A stdin that looks like a TTY and records raw mode. The terminal is restored when `raw` ends on
+     * false: raw mode (no echo, no line editing) outlasts the process if it is left on.
+     */
     function terminal() {
       const h = harness({ interactive: true });
       const raw: boolean[] = [];
@@ -501,6 +538,7 @@ describe("login --with-token", () => {
       expect(h.cap.out).toBe("");
     });
 
+    // In raw mode Ctrl-C arrives as the character \x03, not as SIGINT, so the prompt has to cancel itself.
     it("cancels on Ctrl-C at the prompt: exit 130, nothing stored, terminal restored", async () => {
       const { h, raw, prompted } = terminal();
       const p = loginCommand({ host: HOST_ARG, withToken: true }, h.deps);
@@ -535,6 +573,9 @@ describe("login --with-token", () => {
   });
 });
 
+// An admin token is never written to the plaintext file unless `--insecure-storage` asks for it
+// (login.ts), since a stolen one carries full admin rights. With no keyring it is refused with 77,
+// after the warning, rather than quietly saved to a file.
 describe("tokens that carry admin rights", () => {
   const admin = { username: "root", isAdmin: true };
 

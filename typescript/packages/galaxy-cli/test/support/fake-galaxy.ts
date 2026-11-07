@@ -23,6 +23,11 @@
  * - `/api/users/current`, which knows a user only by a token this server issued and has not
  *   revoked or expired
  *
+ * It is a real HTTP server, not a stubbed `fetch`, for two reasons. The built binary in
+ * e2e.int.test.ts is a separate process and cannot see anything mocked in this one. And the
+ * redirects, connection resets and timing that the client must survive are only real when
+ * there is a socket.
+ *
  * Everything a test needs to steer is a method on the returned object, and every request is
  * recorded in `requests`. Tokens are obviously fake (`fake-access-token-N`).
  *
@@ -61,6 +66,11 @@ export interface Approval {
   accessToken?: string;
 }
 
+/**
+ * One request as the server received it. The body and its parsed form are kept so a test can
+ * show what was sent (the client id, no `client_secret`) and where a token went (in a URL, in a
+ * header, in a body), not only that a request was made.
+ */
 export interface RecordedRequest {
   method: string;
   /** Path and query as sent, including any prefix. */
@@ -73,10 +83,21 @@ export interface RecordedRequest {
   form: Record<string, string>;
 }
 
-/** How `/api/version` answers. */
+/**
+ * How `/api/version` answers, for the check that runs before a token is sent anywhere: the
+ * version (`ok`), a 302 to another origin (`redirect`, as a wrong address such as http for
+ * https or a missing path prefix often answers), or a 200 HTML page (`html`, as a Galaxy behind
+ * a `remote_user` proxy answers). The last two are the answers a token must never follow.
+ */
 export type VersionMode = "ok" | "redirect" | "html";
 
-/** How `/.well-known/oauth-authorization-server...` answers. */
+/**
+ * How `/.well-known/oauth-authorization-server...` answers. `not-found` is the 404 HTML page
+ * Galaxy 26.1 sends today and `not-json` a 200 HTML page: no metadata at all, so the client
+ * says device login is unsupported. `malformed` is a 200 with broken JSON, a protocol fault.
+ * `wrong-issuer` is metadata whose `issuer` is another server's, which RFC 8414 §3.3 says
+ * must not be used, or a hostile Galaxy could point a client at someone else's endpoints.
+ */
 export type MetadataMode = "ok" | "not-found" | "not-json" | "malformed" | "wrong-issuer";
 
 export interface FakeGalaxy {
@@ -87,13 +108,20 @@ export interface FakeGalaxy {
   requestsTo(suffix: string): RecordedRequest[];
   /** User codes issued and not yet approved, denied or expired, oldest first. */
   pendingCodes(): string[];
-  /** Every device code (the secret one the CLI polls with) issued so far, in order. */
+  /**
+   * Every device code (the secret one the CLI polls with) issued so far, in order. It is exposed
+   * so a test can search the CLI's output for it: whoever holds it can collect the token once
+   * the user code is approved, so it must never be printed.
+   */
   deviceCodes(): string[];
   approve(userCode: string, approval?: Approval): void;
   deny(userCode: string): void;
   /** The code stops working: the token endpoint answers `expired_token`. */
   expire(userCode: string): void;
-  /** The next `n` token polls answer `slow_down` (before anything else). */
+  /**
+   * The next `n` token polls answer `slow_down` (before anything else), which RFC 8628 §3.5 says
+   * adds 5 s to the interval.
+   */
   slowDown(n: number): void;
   setDeviceFlow(on: boolean): void;
   setRevocationEndpoint(on: boolean): void;
@@ -104,7 +132,10 @@ export interface FakeGalaxy {
   setInvalidKeyResponse(kind: "anonymous" | "forbidden"): void;
   /** Make the device authorization endpoint answer this response instead (e.g. malformed JSON). */
   setDeviceAuthorizationOverride(r: { status: number; body: string; contentType?: string } | null): void;
-  /** Make the token endpoint answer this response whenever the code is not otherwise resolved. */
+  /**
+   * Make the token endpoint answer this response while the code is still pending. A token fault
+   * or a `slow_down` still comes first.
+   */
   setTokenOverride(r: { status: number; body: string; contentType?: string } | null): void;
   /**
    * Answer every request whose path ends with `pathSuffix` with a redirect to `location`
@@ -123,13 +154,14 @@ export interface FakeGalaxy {
   setUsersCurrentStatus(status: number | null): void;
   /** Issue a token as a finished device login would, without running the flow. */
   issueToken(options?: Approval): string;
-  /** Tokens issued so far, in order. */
+  /** Tokens issued so far, in order, revoked or not. */
   issuedTokens(): string[];
   /** Whether this token would be accepted by `/api/users/current` right now. */
   isTokenValid(token: string): boolean;
   close(): Promise<void>;
 }
 
+/** One device login the fake has issued; a code is good for one token, and then `invalid_grant`. */
 interface DeviceEntry {
   userCode: string;
   deviceCode: string;
@@ -168,6 +200,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
   const devices = new Map<string, DeviceEntry>(); // by user code
   const tokens = new Map<string, TokenEntry>();
   let counter = 0;
+  // Set once the server is listening and has a port: the metadata and the codes need it.
   let baseUrl = "";
 
   const json = (res: ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}) => {

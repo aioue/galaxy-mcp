@@ -29,6 +29,8 @@ describe("resolveConnection", () => {
 
 const tmp = useTempDir("gxy-cfg-");
 
+// A stored login (`gxy auth login`) is one more source for an operation. An explicit key still wins,
+// as it did before stored logins existed, and the stored token goes only to the Galaxy it was stored for.
 describe("resolveConnection with stored logins", () => {
   const url = normalizeBaseUrl("https://galaxy.example.org");
   const login = (over: Partial<StoredLogin> = {}): StoredLogin => fakeLogin({ baseUrl: url, token: "STORED", expiresAt: "2030-01-01T00:00:00.000Z", ...over });
@@ -48,10 +50,13 @@ describe("resolveConnection with stored logins", () => {
   it("prefers the stored login over .env and profile keys", () => {
     expect(resolveConnection({}, src({ dotenv: { GALAXY_API_KEY: "DOT" } })).apiKey).toBe("STORED");
   });
+  // A `--url` naming another Galaxy finds no stored login, so nothing stored is sent there.
   it("ignores a stored login for a different Galaxy", () => {
     const conn = resolveConnection({ url: "https://other.example" }, src({ dotenv: { GALAXY_API_KEY: "DOT" } }));
     expect(conn).toEqual({ baseUrl: "https://other.example", apiKey: "DOT" });
   });
+  // The key goes to the vetted form of the URL it was stored for, not to the raw string, which may
+  // carry a query or an odd path and merely normalise to the same Galaxy.
   it("matches the URL after normalisation, and sends the key to the normalised URL", () => {
     const conn = resolveConnection({ url: "https://GALAXY.example.org/?x=1" }, src());
     expect(conn).toEqual({ baseUrl: url, apiKey: "STORED" });
@@ -73,6 +78,7 @@ describe("resolveConnection with stored logins", () => {
       const s = src({ storedLogin: login({ expiresAt: "2026-05-01T00:00:00.000Z" }) });
       expect(() => resolveConnection({}, s)).toThrow(expect.objectContaining({ kind: "not_logged_in", message: expect.stringMatching(/expired at 2026-05-01.*gxy auth login --host https:\/\/galaxy\.example\.org/) }));
     });
+    // An unreadable expiry counts as expired, and so does one within a minute of running out (config.ts).
     it("is used up to the margin: 30 s left counts as about to expire, two minutes does not", () => {
       expect(() => resolveConnection({}, src({ storedLogin: login({ expiresAt: at(30_000) }) }))).toThrow(/about to expire/);
       expect(resolveConnection({}, src({ storedLogin: login({ expiresAt: at(120_000) }) })).apiKey).toBe("STORED");
@@ -107,6 +113,8 @@ describe("loadSourcesAsync", () => {
     expect(s.storedLogin?.token).toBe("STORED");
     expect(resolveConnection({}, s).apiKey).toBe("STORED");
   });
+  // The store is only read when no explicit key is given, so a broken keyring or hosts.yml never
+  // gets in the way of `--api-key` or GALAXY_API_KEY.
   it("does not touch the store when a key is explicit", async () => {
     const boom = seeded();
     boom.list = async () => { throw new Error("no"); };
@@ -116,6 +124,7 @@ describe("loadSourcesAsync", () => {
       expect(s.storeProblem).toBeUndefined();
     }
   });
+  // A broken store is a warning for an operation, not a usage error: see the last case in exit.test.ts.
   it("turns store failures into a problem rather than throwing", async () => {
     const boom = seeded();
     boom.list = async () => { throw new Error("hosts.yml is not valid"); };
@@ -142,6 +151,8 @@ describe("loadSourcesAsync", () => {
     expect(s.storedLogin?.token).toBe(FAKE_TOKEN);
   });
 
+  // Only a host that matches a stored login exactly gets its token. A `.env` that names another Galaxy
+  // finds no login, and the store's `get` is never called for it, so the token is not even read.
   describe("a stored token goes only to the host it was stored for", () => {
     const now = new Date("2026-06-01");
     it("a .env naming another Galaxy never gets it", async () => {
@@ -162,6 +173,9 @@ describe("loadSourcesAsync", () => {
 });
 
 describe("loadSources (the files and environment)", () => {
+  // Real files in a temp dir, with the working directory and HOME pointed at it: `loadSources` reads
+  // `.env` from the working directory and `~/.planemo.yml` from HOME, and safe-env.ts leaves the
+  // working directory alone.
   async function withFiles(files: Record<string, string>, fn: () => void) {
     for (const [name, text] of Object.entries(files)) await writeFile(join(tmp.path, name), text);
     const cwd = vi.spyOn(process, "cwd").mockReturnValue(tmp.path);

@@ -23,6 +23,9 @@ function contained(command: Command): Command {
   return command;
 }
 
+// The `auth` group as the program wires it: the deps are injected through `makeAuthDeps`, so what is
+// tested is the registration (which command, which option reaches it, when deps are built), not the
+// commands' behaviour, which their own files cover.
 describe("the auth commands", () => {
   it("are the six subcommands of `auth`", () => {
     const auth = buildProgram().commands.find((c) => c.name() === "auth")!;
@@ -36,6 +39,8 @@ describe("the auth commands", () => {
     expect(code).toBe(0);
   });
 
+  // Building the deps opens the credential store, and with it the keyring. `--help` and the operations
+  // must never do that (register.ts calls `makeDeps` once per invocation of an `auth` command).
   it("do not build their deps for --help or for an operation", async () => {
     const makeAuthDeps = vi.fn(() => harness().deps);
     const fetchImpl = (async () => Response.json([])) as typeof fetch;
@@ -53,6 +58,7 @@ describe("the auth commands", () => {
     expect(makeAuthDeps).not.toHaveBeenCalled();
   });
 
+  // 70 is EX_SOFTWARE: failing to build the wiring is a fault in the CLI, not something the person typed.
   it("report a deps factory that throws as exit 70, with its message", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     process.exitCode = 0;

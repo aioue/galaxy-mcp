@@ -5,6 +5,12 @@
  * keyring is off (`GXY_NO_KEYRING`) and HOME is a temp dir too, so nothing here touches the
  * developer's real logins.
  *
+ * Every other auth test calls a command function in process, with fakes injected. That cannot
+ * show the exit status a shell receives, a real SIGINT, a real EPIPE on a pipe whose reader has
+ * gone, that tsup puts `keyring-child.js` beside `index.js`, or `interactive` being decided from
+ * real terminals. The fake Galaxy is a real HTTP server because this binary is a separate
+ * process, and cannot see an in-process mock.
+ *
  * The CLI is built here into a private cache directory, and galaxy-ops (which the binary
  * imports at run time) is built first, so a stale or missing build cannot be what is tested.
  */
@@ -24,6 +30,9 @@ const pkgDir = fileURLToPath(new URL("../..", import.meta.url));
 const outDir = join(pkgDir, "node_modules", ".cache", "gxy-e2e");
 const dist = join(outDir, "index.js");
 const buildEnv = { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" };
+// The one build is linked under both names, because the program names itself in its hints from
+// the name it was started as (`programName`), and `gxy auth login --with-token` must not tell a
+// `galaxy-cli` user to run `gxy`.
 const NAMES = ["gxy", "galaxy-cli"] as const;
 type Name = (typeof NAMES)[number];
 
@@ -59,6 +68,8 @@ interface Seen {
 
 // Every test gets its own HOME (and so its own config dir, under it), its own fake Galaxy and a
 // `run` that starts the binary with them. They are made when a test asks for them and removed when it ends.
+// These are fixtures, not `let`s shared by the file, so the token sweep below sees only this
+// test's files and requests, and one test's login cannot answer for another's.
 const test = base.extend<{
   home: string;
   configDir: string;
@@ -83,16 +94,22 @@ const test = base.extend<{
     }),
   galaxy: async ({ galaxyWith }, use) => use(await galaxyWith()),
   transcript: async ({}, use) => use([]),
+  // The whole environment the binary sees (`extendEnv: false` in `run`): nothing of the
+  // developer's `GALAXY_*`, proxy or `BROWSER` settings reaches it.
   cliEnv: async ({ home, configDir }, use) =>
     use((extra = {}) => ({ PATH: process.env.PATH ?? "", HOME: home, GXY_CONFIG_DIR: configDir, GXY_NO_KEYRING: "1", ...extra })),
   run: async ({ home, cliEnv, transcript }, use) =>
     use((args, opts = {}) => {
       // Typed as text output: `input` and `stdin` below are both conditional, which widens execa's result.
       const child = execa(process.execPath, [bins[opts.name ?? "gxy"]!, ...args], {
+        // The working directory is where `.env` is read from, so by default it is the empty HOME
+        // and never the repository.
         cwd: opts.cwd ?? home,
         extendEnv: false,
         env: cliEnv(opts.env),
         input: opts.input,
+        // With no input, stdin is /dev/null: a command that reads it sees end of input rather
+        // than the developer's terminal.
         stdin: opts.input === undefined ? "ignore" : undefined,
         reject: false,
         timeout: 60_000,
@@ -103,7 +120,9 @@ const test = base.extend<{
     }),
   /**
    * Start a device login, approve its code on the fake while the CLI polls, and wait for it.
-   * The child never outlives the call, whatever happens in between.
+   * The child never outlives the call, whatever happens in between. The code to approve is the
+   * one that is new on the fake, so a second login to the same Galaxy approves its own code and
+   * not the first one's.
    */
   deviceLogin: async ({ run }, use) =>
     use(async (g, approval = {}, opts = {}) => {
@@ -137,7 +156,11 @@ const test = base.extend<{
 // The canary: a token no other value in the run resembles, so finding it anywhere is finding the secret.
 const CANARY = "fake-canary-6d3f0a9b2e71";
 
-/** Every file under `root` (as a path relative to it, sorted) whose bytes contain `needle`. */
+/**
+ * Every file under `root` (as a path relative to it, sorted) whose bytes contain `needle`. It
+ * reads every file, not only the ones the CLI is known to write, so a stray log or backup that
+ * holds the token is found too.
+ */
 async function filesHolding(root: string, needle: string): Promise<string[]> {
   const found: string[] = [];
   const walk = async (dir: string): Promise<void> => {
@@ -152,7 +175,9 @@ async function filesHolding(root: string, needle: string): Promise<string[]> {
 }
 
 /**
- * The token is only where it belongs, wherever it could have gone:
+ * The token sweep: the token is only where it belongs, wherever it could have gone. The commands'
+ * own tests see only what a command wrote to its streams, so a leak to a file or a URL is
+ * invisible to them. The canary is the token, so one string search answers each place:
  * - on disk, in `files` (paths under `home`) and nowhere else under HOME, whatever the file is called;
  * - on the wire, in an `x-api-key` or `authorization` header, or in the body of a revocation: never
  *   in a URL (which proxies and logs keep), another header or another body;
@@ -163,14 +188,18 @@ async function expectTokenOnlyWhereAllowed(
   where: { home: string; files: string[]; galaxy: FakeGalaxy; transcript: Seen[] },
 ): Promise<void> {
   expect(await filesHolding(where.home, token), "files under HOME holding the token").toEqual(where.files);
+  // A token put in a query string would be percent-encoded, so both spellings are searched for.
   const forms = [token, encodeURIComponent(token)];
   for (const r of where.galaxy.requests) {
     const what = `${r.method} ${r.url}`;
     for (const form of forms) expect(r.url, what).not.toContain(form);
     for (const [name, value] of Object.entries(r.headers)) {
+      // `x-api-key` is where galaxy-ops sends it, and `Authorization` the other header Galaxy
+      // was asked to accept it in. Any other header carrying it is a leak.
       if (name === "x-api-key" || name === "authorization") continue;
       expect([value].flat().join("\n"), `${what}, header ${name}`).not.toContain(token);
     }
+    // A revocation carries the token in its body (RFC 7009 §2.1); no other request has a reason to.
     if (!new URL(r.url, "http://x").pathname.endsWith("/oauth/revoke")) expect(r.body, `${what}, body`).not.toContain(token);
   }
   for (const seen of where.transcript) {
@@ -232,7 +261,7 @@ describe("auth, end to end", () => {
     // Logged out: it is gone from every file under HOME, not only from the one we know about.
     await expectTokenOnlyWhereAllowed(token, { home, files: [], galaxy, transcript });
     const gone = await run(["auth", "token"]);
-    expect(gone.exitCode).toBe(77); // nothing stored: not logged in
+    expect(gone.exitCode).toBe(77); // EX_NOPERM: nothing stored, so not logged in
     expect(gone.stdout).toBe("");
   }, 90_000);
 
@@ -273,6 +302,8 @@ describe("auth, end to end", () => {
     }, 30_000);
   });
 
+  // 76 is EX_PROTOCOL, "remote error in protocol" (exit.ts): Galaxy answered, but not with a device
+  // flow. The way out is the hint, a pasted key, spelled with whichever name was run.
   test.for(NAMES)("as %s, exits 76 and points at --with-token under its own name when the device flow is off", { timeout: 30_000 }, async (name, { galaxy, run }) => {
     galaxy.setDeviceFlow(false);
     const login = await run(["auth", "login", "--host", galaxy.baseUrl], { name });
@@ -291,6 +322,8 @@ describe("auth, end to end", () => {
     expect((await deviceLogin(galaxy)).exitCode).toBe(0);
     expect((await deviceLogin(second)).exitCode).toBe(0);
     const ambiguous = await run(["auth", "token"]);
+    // 64 is EX_USAGE, not 77: the command line did not say which Galaxy, so the caller can fix it
+    // by saying so (--host, or GALAXY_URL), and nothing is wrong with either login.
     expect(ambiguous.exitCode).toBe(64);
     expect(ambiguous.stdout).toBe("");
     expect(ambiguous.stderr).toContain(galaxy.baseUrl);
@@ -299,6 +332,9 @@ describe("auth, end to end", () => {
     expect((await run(["auth", "token", "--host", second.baseUrl])).stdout.trim()).toBe(second.issuedTokens()[0]);
   }, 90_000);
 
+  // GALAXY_URL and GALAXY_API_KEY are the variables the Python galaxy-mcp server reads, and an
+  // explicit key has always won here (config.ts), so an environment that already works keeps working
+  // after a login is stored.
   test("lets GALAXY_API_KEY override the stored login", async ({ galaxy, run, deviceLogin }) => {
     expect((await deviceLogin(galaxy)).exitCode).toBe(0);
     const seen = galaxy.requestsTo("/api/users/current").length;
@@ -325,6 +361,9 @@ describe("auth, end to end", () => {
   });
 
   test("lets `auth token | head -c1` end quietly with 0, when the output is more than the pipe holds", async ({ galaxy, run, cliEnv, home, configDir }) => {
+    // Without epipe.ts the failed write is an uncaught exception: a stack trace on stderr, from a
+    // command whose output is a secret. Node ignores SIGPIPE, so a gone reader arrives as an EPIPE
+    // error on the write, not as a killed process.
     // A short token fits in the pipe's buffer before `head` leaves, so no write ever fails and
     // nothing is tested. A token of half a megabyte cannot: the write is still going when the
     // reader goes, and it fails with a real EPIPE. (Any printable ASCII is a token: token-shape.ts.)
@@ -339,6 +378,8 @@ describe("auth, end to end", () => {
     expect(whole.exitCode, whole.stderr).toBe(0);
     expect(whole.stdout.length, "more than a 64 KiB pipe buffer").toBeGreaterThan(256 * 1024);
 
+    // Through bash so the pipe to `head` is a real one, and `PIPESTATUS[0]` is gxy's own exit status,
+    // which the pipeline's (`head`'s) would hide. Its stderr goes to a file: a stack trace would be there.
     const errFile = join(home, "epipe-stderr");
     const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(bins.gxy)} auth token 2>${JSON.stringify(errFile)} | head -c1 >/dev/null; echo \${PIPESTATUS[0]}`;
     const r = await execa("bash", ["-c", command], { cwd: home, extendEnv: false, env: cliEnv(), timeout: 30_000 });
@@ -346,6 +387,10 @@ describe("auth, end to end", () => {
     expect(await readFile(errFile, "utf8")).toBe("");
   }, 60_000);
 
+  // `login` sends a key, or asks a person to approve a code, to the host it picks, so a `.env` in a
+  // cloned repository must not be able to choose it (`forLogin` in host.ts). Each case points a
+  // `.env` at a real decoy Galaxy and then checks the decoy's request log is empty: "never
+  // contacted" is shown by what the decoy received, not by what the command printed.
   describe("login never takes its host from a .env in the working directory", () => {
     /** A working directory whose `.env` names `url` as the Galaxy. */
     async function cwdWithDotenv(home: string, url: string): Promise<string> {
@@ -378,6 +423,8 @@ describe("auth, end to end", () => {
     }, 60_000);
   });
 
+  // The command tests abort an `AbortController`; only a real process shows that a real SIGINT
+  // reaches it. 130 is 128 plus SIGINT's 2, the shell's convention for a Ctrl-C.
   describe("Ctrl-C", () => {
     test("aborts the wait for approval: exit 130, \"Cancelled.\", nothing stored, and the process is gone", async ({ galaxy, run, configDir }) => {
       const child = run(["auth", "login", "--host", galaxy.baseUrl]);
@@ -402,13 +449,19 @@ describe("auth, end to end", () => {
   });
 
   // `interactive` is decided in deps.ts from the real streams: stdin and stderr both terminals. Only a
-  // pseudo-terminal shows it. util-linux `script` gives the binary one without a native addon.
+  // pseudo-terminal shows it: the in-process login tests fake a terminal with a flag, so nothing else
+  // sees this wiring. util-linux `script` gives the binary one without a native addon (`node-pty`
+  // would need building). Only util-linux's `script` is used, because the BSD one takes different arguments.
   // On a terminal the CLI offers to open the page (when it can: `$BROWSER` here), and Enter does it.
   const hasScript = process.platform === "linux" && /util-linux/.test(spawnSync("script", ["--version"], { encoding: "utf8" }).stdout ?? "");
   describe.skipIf(!hasScript)("on a terminal (a pseudo-terminal from `script`)", () => {
     const OFFER = "Press Enter to open that page in your browser";
 
-    /** A `$BROWSER` that records its argument count and arguments, one per line, in a file. */
+    /**
+     * A `$BROWSER` that records its argument count and arguments, one per line, in a file. It is
+     * written to a `.part` file and renamed, so a reader never sees half of it, and `opened()` is
+     * `null` until the launcher has run.
+     */
     async function browserStub(home: string) {
       const path = join(home, "stub-browser");
       const argvFile = join(home, "stub-browser.argv");
@@ -417,7 +470,12 @@ describe("auth, end to end", () => {
       return { path, argvFile, opened: () => readFile(argvFile, "utf8").then((t) => t.split("\n").slice(0, -1), () => null) };
     }
 
-    /** `script` runs `command` with a terminal for stdin, stdout and stderr, and exits with its status. */
+    /**
+     * `script` runs `command` with a terminal for stdin, stdout and stderr, and exits with its status
+     * (`-e`; `-q` drops its banner and the typescript file is /dev/null). All three streams are the
+     * terminal, so what the CLI writes to stderr arrives on `script`'s stdout, and the tests read
+     * the screen from that one stream. `stdin: "pipe"` is how a test types Enter.
+     */
     function onTerminal(command: string, home: string, env: Record<string, string>) {
       return execa("script", ["-qec", command, "/dev/null"], { cwd: home, extendEnv: false, env, stdin: "pipe", reject: false, timeout: 60_000 });
     }
@@ -480,8 +538,11 @@ describe("auth, end to end", () => {
     });
   });
 
-  // The keyring helper is a second built file (dist/keyring-child.js). Every other case turns the
-  // keyring off, so this is the one that would notice it missing from the build.
+  // The keyring helper is a second built file (`keyring-child.js`, a second tsup entry beside
+  // `index.js`). Every other case turns the keyring off, so this is the one that would notice it
+  // missing from the build. The fake bus accepts the connection and never answers it, which is what
+  // blocks the native module for ever (keyring-node#156) and is why every keyring call runs in a
+  // child that is killed at the timeout.
   describe.skipIf(process.platform !== "linux")("the real keyring helper, against a session bus that never answers", () => {
     test("reports that the keyring did not answer, within the timeout plus a margin, and exits", async ({ galaxy, run, configDir, skip }) => {
       const dir = await mkdtemp(join(tmpdir(), "gxy-bus-"));
