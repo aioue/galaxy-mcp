@@ -8,10 +8,14 @@ import { AuthError, type BaseUrl } from "./types";
  * Query, fragment and trailing slashes are dropped, the host is lower-cased by URL itself,
  * and default ports vanish the same way.
  *
- * A trailing `/api` is dropped too: people paste the API root, and `https://x/api` and
- * `https://x` are the same Galaxy. Control characters and whitespace anywhere in the URL are
- * refused rather than trimmed (a stray `\r` from a CRLF file would otherwise quietly become
- * a different key), and comparison is always exact, never by prefix.
+ * Trailing `/api` segments are dropped too, however many: people paste the API root, and
+ * `https://x/api` and `https://x` are the same Galaxy. Stripping them all keeps the result a
+ * fixed point (`normalizeBaseUrl(normalizeBaseUrl(u)) === normalizeBaseUrl(u)`), which matters
+ * because the result is a credential key and `resolveHost` normalises a stored key again.
+ * A segment that merely contains `api` (`/apiary`) is a different Galaxy and stays. Control
+ * characters and whitespace anywhere in the URL are refused rather than trimmed (a stray
+ * `\r` from a CRLF file would otherwise quietly become a different key), and comparison is
+ * always exact, never by prefix.
  *
  * Plain http is refused except to loopback: a token sent in the clear is a token handed
  * out, and the only honest use for http here is a Galaxy on this machine.
@@ -38,7 +42,8 @@ export function normalizeBaseUrl(input: string): BaseUrl {
   if (url.protocol === "http:" && !isLoopback(url.hostname)) {
     throw new AuthError("insecure", `Refusing plain http to ${url.host}: a token would cross the network unencrypted. Use https.`);
   }
-  const path = url.pathname.replace(/\/+$/, "").replace(/\/api$/, "").replace(/\/+$/, "");
+  let path = url.pathname.replace(/\/+$/, "");
+  while (path.endsWith("/api")) path = path.slice(0, -"/api".length).replace(/\/+$/, "");
   return `${url.protocol}//${url.host}${path}` as BaseUrl;
 }
 
