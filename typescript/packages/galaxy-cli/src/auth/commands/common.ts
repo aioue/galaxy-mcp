@@ -22,7 +22,11 @@ function proxyHint(env: AuthDeps["env"]): string | undefined {
 /**
  * Print a failure for a person and map it to an exit code. Never includes a token: messages
  * are ours. They can still quote the server (an OAuth error text, a whoami failure), so
- * terminal control characters are stripped on the way out.
+ * terminal control characters are stripped on the way out, or a Galaxy could rewrite the
+ * terminal through an error text.
+ *
+ * An `AuthError` maps by its kind (`exitCodeForAuthError`). Anything else is not something the
+ * person typed or a server did, so it is 70 (EX_SOFTWARE).
  */
 export function fail(deps: AuthDeps, e: unknown): number {
   if (e instanceof AuthError) {
@@ -35,6 +39,7 @@ export function fail(deps: AuthDeps, e: unknown): number {
   return EX_SOFTWARE;
 }
 
+/** The host and path prefix, as shown: two Galaxies on one host are two logins, so the prefix stays. */
 export function hostOf(baseUrl: string): string {
   try {
     return new URL(baseUrl).host + (new URL(baseUrl).pathname.replace(/\/+$/, ""));
@@ -63,7 +68,10 @@ export function formatCountdown(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-/** Keep the last four characters so a person can tell tokens apart; hide the rest. */
+/**
+ * Keep the last four characters so a person can tell tokens apart; hide the rest. A token of
+ * twelve or fewer is hidden whole, so the four shown are never a large share of one.
+ */
 export function maskToken(token: string): string {
   return token.length > 12 ? `${"*".repeat(8)}${token.slice(-4)}` : "*".repeat(8);
 }
@@ -74,7 +82,8 @@ export function describeStorage(kind: StorageKind): string {
 
 /**
  * The stored, unexpired login for the host a command means, or an AuthError that says
- * how to log in. No network: `token`, `env` and `headers` are called by helpers.
+ * how to log in. No network: `token`, `env` and `headers` are called by helpers (a Claude Code
+ * `headersHelper` gets ten seconds), so they answer from the store and leave checking to `status`.
  */
 export async function requireLogin(deps: AuthDeps, explicitHost?: string): Promise<StoredLogin> {
   let baseUrl: BaseUrl;

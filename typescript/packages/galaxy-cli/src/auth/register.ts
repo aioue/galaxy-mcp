@@ -11,7 +11,8 @@ import { exitQuietlyOnEpipe } from "./epipe";
 
 /**
  * `--scopes a,b`, `--scopes "a b"` or `--scopes a --scopes b`: every use adds to the list,
- * in order, without repeats.
+ * in order, without repeats. Commander hands each use the list so far; a parser that ignored
+ * `previous` would keep only the last `--scopes`, and a login would ask for less than was typed.
  */
 export function parseScopes(value: string, previous: string[] = []): string[] {
   const added = value.split(/[,\s]+/).filter(Boolean);
@@ -33,6 +34,8 @@ export function registerAuth(program: Command, makeDeps: (commandName: string) =
     try {
       deps = makeDeps(commandName);
     } catch (e) {
+      // Building the wiring failed before anything the person typed was looked at, so this is
+      // the CLI's fault: 70 (EX_SOFTWARE), not a usage error.
       console.error((e as Error).message);
       process.exitCode = EX_SOFTWARE;
       return;
@@ -50,6 +53,10 @@ export function registerAuth(program: Command, makeDeps: (commandName: string) =
     .option("--insecure-storage", "store the token in a file instead of the system keyring")
     .action((o) =>
       run(async (deps) => {
+        // Ctrl-C aborts one signal that every step of the login takes (discovery, the code
+        // request, the prompts, the poll), so it ends with "Cancelled." and 130, and a cancel
+        // before the code request leaves no code on the server. `once`, so a second Ctrl-C falls
+        // through to Node's default and ends the process.
         const ac = new AbortController();
         const onSig = () => ac.abort();
         process.once("SIGINT", onSig);

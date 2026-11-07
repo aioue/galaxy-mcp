@@ -27,6 +27,9 @@ export interface PickHostInput {
    * a repository must not be able to choose where your credentials go. Everything else
    * (reading a stored token, running an operation) only uses a host that must match a
    * stored login to get a token, so the files are safe there.
+   *
+   * The Python galaxy-mcp server holds to the same line from the other side: its
+   * `GALAXY_API_KEY` is only used with the `GALAXY_URL` it was configured with.
    */
   forLogin?: boolean;
 }
@@ -36,6 +39,9 @@ export interface PickHostInput {
  * cannot pick different ones: `--host`/`--url`, then `GALAXY_URL` in the environment, then in
  * `.env`, then the `--profile` URL, then the only stored login. Returns the URL as named
  * (not normalised: operations keep an `http://` URL that `auth` would refuse).
+ *
+ * `auth` and operations each had their own copy of this rule before, and could pick different
+ * Galaxies from the same `.env` and profile.
  */
 export function pickHost(input: PickHostInput): { url: string; source: HostSource } {
   const named: [HostSource, string | undefined][] = [

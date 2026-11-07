@@ -14,6 +14,8 @@ export function createAuthDeps(commandName: string, globals: () => { url?: strin
   const fetchWithUa = withUserAgent();
   return {
     store,
+    // `GXY_OAUTH_CLIENT_ID` replaces the public client id `galaxy-cli`, for testing `login`
+    // against other servers.
     discover: (baseUrl, signal) =>
       discover(baseUrl, { clientId: env.GXY_OAUTH_CLIENT_ID || undefined, fetch: fetchWithUa, signal }),
     whoami: createWhoami(),
@@ -48,6 +50,8 @@ export function createAuthDeps(commandName: string, globals: () => { url?: strin
       stdin: process.stdin,
       stdout: process.stdout,
       stderr: process.stderr,
+      // stdin and stderr, not stdout: every prompt goes to stderr and is answered on stdin, and
+      // stdout is left free to be piped (`eval "$(gxy auth env)"`) without switching prompts off.
       interactive: Boolean(process.stdin.isTTY && process.stderr.isTTY),
     },
     commandName,

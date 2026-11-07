@@ -24,7 +24,8 @@ export function canOpenBrowser(env: Env = process.env, platform: NodeJS.Platform
 
 /**
  * Open a URL in the user's browser, detached. The URL is an argv entry, never part of a
- * shell string. On Windows, `rundll32 url.dll,FileProtocolHandler` takes it the same way;
+ * shell string: it came from the server, and a `;` or a backtick in it must not become a
+ * command. On Windows, `rundll32 url.dll,FileProtocolHandler` takes it the same way;
  * `cmd /c start` would hand `&` in a URL to cmd's parser.
  *
  * Order: each `$BROWSER` candidate (a `%s` in one is replaced by the URL, otherwise the URL
@@ -38,6 +39,7 @@ export async function openBrowser(
   platform: NodeJS.Platform = process.platform,
   spawnImpl: typeof spawn = spawn,
 ): Promise<boolean> {
+  // Only web pages: a launcher given `file:` or an app's own scheme would run whatever handles it.
   if (!/^https?:\/\//i.test(url)) return false;
   const launchers: [string, string[]][] = browserCandidates(env).map((candidate) => {
     const parts = candidate.split(/\s+/);
@@ -68,6 +70,8 @@ function launch(spawnImpl: typeof spawn, cmd: string, args: string[]): Promise<b
       resolve(ok);
     };
     try {
+      // Detached with no stdio, and unref'd once it starts, so a browser that stays open does not
+      // keep `gxy` running after login is done.
       const child = spawnImpl(cmd, args, { detached: true, stdio: "ignore" });
       timer = setTimeout(() => {
         child.unref();

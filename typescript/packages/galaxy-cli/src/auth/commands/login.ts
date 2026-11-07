@@ -24,6 +24,7 @@ function sameGalaxy(a: string, b: string): boolean {
   }
 }
 
+/** 128 + SIGINT, which is what a shell reports for a process that Ctrl-C ended. */
 const EX_INTERRUPTED = 130;
 const REVOKE_TIMEOUT_MS = 5000;
 
@@ -78,7 +79,13 @@ function tokenWarnings(expiresAt: string | null): string[] {
   return expiresAt === null ? ["! This token has no expiry: it works until you revoke it in Galaxy's user preferences."] : [];
 }
 
-/** One wording and hint for every way a Galaxy can lack device login. */
+/**
+ * One wording and hint for every way a Galaxy can lack device login: 76 (EX_PROTOCOL), the code
+ * for a server that does not speak what we need, and `--with-token` as the way in meanwhile.
+ *
+ * It is what a person on Galaxy 26.1 sees today, which publishes no OAuth metadata, and will
+ * keep seeing until the device flow ships (galaxyproject/galaxy#23645).
+ */
 function noDeviceLogin(deps: AuthDeps, host: string, baseUrl: string, why: string): AuthError {
   return new AuthError(
     "unsupported",
@@ -108,6 +115,18 @@ async function revokeAfterFailure(server: AuthServer, token: string, host: strin
   }
 }
 
+/**
+ * Log in by the device flow (RFC 8628), or with `--with-token` store a key from stdin.
+ *
+ * The Galaxy comes only from `--host`, `GALAXY_URL` in the environment or the one stored login,
+ * never `.env` or a profile, and the person is told where the login is going before a key is
+ * read or a code asked for. `gh auth login --with-token` reads stdin the same way, and the key is
+ * never an argument: it would sit in shell history and `ps`, which is why `--api-key` is deprecated.
+ *
+ * Either way the token goes through `whoami` before it is stored, so a key that Galaxy does not
+ * accept is never kept, and `whoami` runs the `/api/version` probe, so a token is only sent to
+ * something that answers as a Galaxy.
+ */
 export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<number> {
   const err = (s: string) => deps.io.stderr.write(`${s}\n`);
   // One signal for the whole command: every step below either takes it or is raced against it.
@@ -122,6 +141,8 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       try {
         baseUrl = await abortable(deps.resolveHost(undefined, "login"), signal);
       } catch (e) {
+        // Asked only when nothing at all names a Galaxy and a person is there to answer. With
+        // `--with-token` stdin is for the key, so it cannot also be asked for a URL.
         if (!(e instanceof AuthError && e.kind === "usage") || !deps.io.interactive || opts.withToken) throw e;
         reader = lineReader(deps.io.stdin);
         deps.io.stderr.write("Galaxy URL (for example https://usegalaxy.org): ");
@@ -145,11 +166,14 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     // Before a key is read or a code is requested: the person sees where it is going.
     err(`Logging in to ${host}`);
 
+    // Operations take `GALAXY_API_KEY` before any stored login (config.ts), so the login made here
+    // would go unused. gh refuses to log in while `GH_TOKEN` is set; this warns and carries on.
     if (deps.env.GALAXY_API_KEY) {
       err("! GALAXY_API_KEY is set and will take precedence over the login stored now. Unset it to use the stored login.");
     }
 
-    // 2a. A key pasted on stdin, or typed at a terminal.
+    // 2a. A key pasted on stdin, or typed at a terminal (without echo, so it stays off the screen
+    // and out of scrollback).
     if (opts.withToken) {
       let typed: string;
       if (deps.io.interactive && isRawCapable(deps.io.stdin)) {
@@ -175,9 +199,10 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       };
       // The write is atomic and short, so it is not interrupted; this is the last point to cancel.
       signal.throwIfAborted();
-      // An admin's token is never written to the plaintext file unless asked for by flag.
       const adminWarn = adminWarning(host, who);
       if (adminWarn) err(adminWarn);
+      // An admin key is unscoped, so it is kept in the keyring or not at all: with no keyring,
+      // login refuses unless `--insecure-storage` says a plaintext file is acceptable.
       const put = await deps.store.put(login, { insecureStorage: opts.insecureStorage, ...(who.isAdmin ? { requireKeyring: true } : {}) });
       if (put.warning) err(`! ${put.warning}`);
       err(`✓ Logged in to ${host} as ${sanitize(who.username)}`);
@@ -191,7 +216,8 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     try {
       server = await abortable(deps.discover(baseUrl, signal), signal);
     } catch (e) {
-      // Discovery says "unsupported" only when there is no usable metadata (404, not JSON).
+      // Discovery says "unsupported" only when there is no usable metadata (404, not JSON), which
+      // is what Galaxy 26.1 gives; `noDeviceLogin` points at `--with-token`.
       if (e instanceof AuthError && e.kind === "unsupported") throw noDeviceLogin(deps, host, baseUrl, "it publishes no OAuth metadata");
       throw e;
     }
@@ -213,10 +239,15 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     err(`Requesting access to ${host}`);
     err(`  Scopes  ${scopes.length ? sanitize(scopes.join(" ")) : "server default"}`);
     err("");
+    // RFC 8628 §5.4 (remote phishing): a person can be talked into approving a code they never
+    // started, so the terminal that did start one says to approve only that. Only the user code is
+    // printed; the device code never leaves `waitForApproval`.
     err("! Only approve this code if you ran this command yourself.");
     err(`  One-time code: ${sanitize(pending.userCode)}`);
     err(`  Enter it at ${sanitize(pending.verificationUri)}`);
 
+    // As `gh auth login` does: offer on a terminal and wait for Enter, and print the URL and nothing
+    // more when not interactive, so a script or an agent never has a browser opened for it.
     const canOpen = opts.browser !== false && deps.io.interactive && (deps.canOpenBrowser?.() ?? true);
     if (canOpen) {
       err("Press Enter to open that page in your browser…");
@@ -242,6 +273,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       signal.throwIfAborted();
       const adminWarn = adminWarning(host, who);
       if (adminWarn) err(adminWarn);
+      // The same admin rule as for a pasted key, above.
       put = await deps.store.put(
         {
           baseUrl,
@@ -265,6 +297,8 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     for (const w of tokenWarnings(expiresAt)) err(w);
     return 0;
   } catch (e) {
+    // A Ctrl-C at the key prompt arrives as a character in raw mode, not as SIGINT, hence
+    // `InputCancelled`; either way it is 130 and not a failure message.
     if (signal.aborted || e instanceof InputCancelled) {
       err("Cancelled.");
       return EX_INTERRUPTED;

@@ -14,6 +14,7 @@ export interface DiscoverOptions {
   signal?: AbortSignal;
 }
 
+/** The `grant_type` of RFC 8628 §3.4, sent by `genericGrantRequest` because the polling loop is ours. */
 const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 
 /** The endpoints that carry a token or a device code, and so must be on the issuer's own origin. */
@@ -21,8 +22,10 @@ const ENDPOINTS_ON_ISSUER_ORIGIN = ["device_authorization_endpoint", "token_endp
 
 /**
  * `fetch` with two guards of our own. Plain http goes only to a loopback address, however
- * the library was configured (its `allowInsecureRequests` is all-or-nothing). And the
- * caller's signal cancels every request.
+ * the library was configured (its `allowInsecureRequests` is all-or-nothing), because over
+ * plain http to anything else the device code and then the token would cross the network in
+ * the clear. And the caller's signal cancels every request, so a Ctrl-C ends a request that
+ * is in flight rather than only the wait between two.
  */
 function guardedFetch(base: typeof fetch, signal: AbortSignal | undefined): typeof fetch {
   return (input, init) => {
@@ -35,7 +38,13 @@ function guardedFetch(base: typeof fetch, signal: AbortSignal | undefined): type
   };
 }
 
-/** Transient failures worth another poll: no answer, a timeout, a 5xx or a 429. Never TLS trouble. */
+/**
+ * Transient failures worth another poll: no answer, a timeout, a 5xx or a 429. Never TLS
+ * trouble, which would only fail the same way until the code ran out.
+ *
+ * Returns the least the server wants us to wait in milliseconds (`Retry-After`, or 0), or
+ * `undefined` when the failure is not one to retry.
+ */
 function transientDelayMs(err: unknown): number | undefined {
   const retryAfter = (response: Response | undefined): number => {
     const v = Number(response?.headers.get("retry-after"));
@@ -52,7 +61,7 @@ function transientDelayMs(err: unknown): number | undefined {
   return undefined;
 }
 
-/** Sleep that ends early, rejecting, when the signal aborts. */
+/** Sleep that ends early, rejecting, when the signal aborts, so Ctrl-C never waits out an interval. */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(signal.reason);
@@ -79,7 +88,13 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  * The client is public: it holds no secret and says so (`None()`), so there is nothing to leak
  * to a server that asks. Plain http is allowed only to a loopback host, for a Galaxy on this
  * machine; `normalizeBaseUrl` already refuses it elsewhere, and this checks again because a
- * token is what is at stake.
+ * token is what is at stake. A Galaxy under a path prefix is found by RFC 8414's path
+ * insertion, which the library does, and the metadata's `issuer` must equal `baseUrl` or the
+ * metadata is refused as being about another server.
+ *
+ * No released Galaxy serves the device flow yet (the server side is galaxyproject/galaxy#23645):
+ * Galaxy 26.1 answers the well-known URL with an HTML 404 page, which comes out of here as
+ * `unsupported`, and `login` turns that into a hint to use `--with-token`.
  *
  * Every failure is an `AuthError`; see `types.ts` for what each kind means.
  */
@@ -107,7 +122,8 @@ export async function discover(baseUrl: BaseUrl, options: DiscoverOptions = {}):
 
   const meta = config.serverMetadata();
   // Logout sends the token to `revocation_endpoint` and polling sends the device code to
-  // `token_endpoint`: none may point anywhere but the Galaxy that was asked.
+  // `token_endpoint`: none may point anywhere but the Galaxy that was asked, or the metadata
+  // could send the device code and the token to another host.
   for (const name of ENDPOINTS_ON_ISSUER_ORIGIN) {
     const value = meta[name];
     if (typeof value !== "string") continue;
@@ -145,6 +161,12 @@ export async function discover(baseUrl: BaseUrl, options: DiscoverOptions = {}):
       }
       const expiresAt = new Date(Date.now() + response.expires_in * 1000);
 
+      // Only the user code and `verification_uri` leave this function. The device code stays in
+      // this closure, so nothing downstream can print it: it is the secret half of the pair
+      // (RFC 8628 §3.2), and whoever holds it collects the token once the person approves.
+      // `verification_uri_complete` is ignored even when sent: the code is shown and typed, not
+      // carried in a link, so an approval means the person saw it where the command ran (§5.4 is
+      // the remote-phishing risk this narrows).
       const pending: PendingDeviceLogin = {
         userCode: response.user_code,
         verificationUri: response.verification_uri,
@@ -157,9 +179,10 @@ export async function discover(baseUrl: BaseUrl, options: DiscoverOptions = {}):
           const deadlineTimer = setTimeout(() => deadlineControl.abort(), Math.max(0, expiresAt.getTime() - Date.now()));
           const deadline = deadlineControl.signal;
           const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
-          // RFC 8628 §3.5: poll every `interval` seconds (default 5), 5 more after `slow_down`.
-          // The loop is ours, not openid-client's, because its waits ignore the signal for up
-          // to 5 s and its timers keep the process alive after a Ctrl-C.
+          // RFC 8628 §3.5: poll every `interval` seconds (default 5), and 5 more for this and every
+          // later poll after a `slow_down`. The loop is ours, not openid-client's, because its
+          // waits ignore the signal for up to 5 s and its timers keep the process alive after a
+          // Ctrl-C.
           let intervalMs = (response.interval ?? 5) * 1000;
           let failures = 0;
           let delayMs = intervalMs;
@@ -183,6 +206,8 @@ export async function discover(baseUrl: BaseUrl, options: DiscoverOptions = {}):
                   delayMs = intervalMs;
                   continue;
                 }
+                // Anything else ends the wait. RFC 8628 §3.5 says `access_denied` and `expired_token`
+                // do, and an error we do not recognise is not one to keep asking the server about.
                 const transient = transientDelayMs(err);
                 if (transient === undefined) throw mapError(err, "poll", baseUrl);
                 failures += 1;
@@ -203,6 +228,8 @@ export async function discover(baseUrl: BaseUrl, options: DiscoverOptions = {}):
         throw new AuthError("unsupported", `${baseUrl} does not publish a revocation endpoint.`);
       }
       try {
+        // RFC 7009 §2.1: the hint saves the server working out which kind of token this is. A
+        // token that is already dead still gets a 200 (§2.2), so a late logout is not an error.
         await client.tokenRevocation(config, token, { token_type_hint: "access_token" });
       } catch (err) {
         throw mapError(err, "revoke", baseUrl);
@@ -256,6 +283,8 @@ function mapError(err: unknown, phase: Phase, baseUrl: string): AuthError {
         return new AuthError("insecure", `Refusing plain http to ${baseUrl}.`, { cause: err });
       case "OAUTH_RESPONSE_IS_NOT_CONFORM":
       case "OAUTH_RESPONSE_IS_NOT_JSON":
+        // At discovery this is "no device login here", not a broken Galaxy: Galaxy 26.1 answers
+        // the well-known URL with an HTML 404 page, as would any server with no such document.
         if (phase === "discovery") {
           return new AuthError("unsupported", `${baseUrl} publishes no OAuth metadata (${detail}).`, { cause: err });
         }

@@ -16,7 +16,10 @@ import { registerAuth } from "./auth/register";
 import { createAuthDeps } from "./auth/deps";
 import { AuthError, type AuthDeps } from "./auth/types";
 
-/** `gxy` when invoked through that name, else `galaxy-cli`. */
+/**
+ * `gxy` when invoked through that name, else `galaxy-cli`, so a hint says "run gxy auth login" to
+ * someone who typed `gxy`.
+ */
 export function programName(invoked: string | undefined = process.argv[1]): string {
   const base = invoked ? basename(invoked).replace(/\.(cmd|exe|js)$/i, "") : "";
   return base === "gxy" ? "gxy" : "galaxy-cli";
@@ -55,6 +58,8 @@ export function buildProgram(deps: CliDeps = {}): Command {
       const positionals = args.slice(0, -2) as (string | undefined)[];
       const globals = command.optsWithGlobals<{ url?: string; apiKey?: string; profile?: string; format: Format; quiet: boolean; timeout?: string }>();
 
+      // Still works, so a script that passes it keeps running; stderr, so `--format json` output
+      // stays parseable.
       if (globals.apiKey) {
         console.error(
           `Warning: --api-key is deprecated: the key is visible in shell history and process listings. Use \`${program.name()} auth login\` or set GALAXY_API_KEY instead.`,
@@ -73,6 +78,8 @@ export function buildProgram(deps: CliDeps = {}): Command {
         try {
           const flags = { url: globals.url, apiKey: globals.apiKey, profile: globals.profile };
           conn = resolveConnection(flags, await loadSourcesAsync(flags));
+          // A key was found but something is off (an unreadable store, an expired login with
+          // another key used instead): worth a line, not a failure.
           if (conn.warning) console.error(`Warning: ${conn.warning}`);
         } catch (e) {
           console.error((e as Error).message);
