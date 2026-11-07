@@ -418,6 +418,52 @@ describe("login --with-token", () => {
     expect(h.store.putCalls).toEqual([]);
   });
 
+  describe("proxy hint on a network failure", () => {
+    const HINT = "Node ignores it unless NODE_USE_ENV_PROXY=1 is also set";
+    const failWith = async (env: Record<string, string>, err = new AuthError("network", "Could not reach it.")) => {
+      const h = harness({ env, stdinText: FAKE_TOKEN });
+      h.deps.whoami = async () => {
+        throw err;
+      };
+      const code = await loginCommand({ host: HOST_ARG, withToken: true }, h.deps);
+      return { code, err: h.cap.err, out: h.cap.out };
+    };
+
+    it.each(["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY"])("names %s when it is set without NODE_USE_ENV_PROXY", async (name) => {
+      const r = await failWith({ [name]: "http://proxy.example.org:3128" });
+      expect(r.code).toBe(69);
+      expect(r.err).toContain(`${name} is set, but ${HINT} (Node 22.21+ or 24+).`);
+    });
+
+    it("is absent when NODE_USE_ENV_PROXY=1", async () => {
+      const r = await failWith({ HTTPS_PROXY: "http://proxy.example.org:3128", NODE_USE_ENV_PROXY: "1" });
+      expect(r.code).toBe(69);
+      expect(r.err).not.toContain(HINT);
+    });
+
+    it("is absent when no proxy variable is set", async () => {
+      const r = await failWith({});
+      expect(r.code).toBe(69);
+      expect(r.err).not.toContain(HINT);
+    });
+
+    it("is absent for an error that is not a network error", async () => {
+      const r = await failWith({ HTTPS_PROXY: "http://proxy.example.org:3128" }, new AuthError("not_logged_in", "Galaxy rejected the key."));
+      expect(r.code).toBe(77);
+      expect(r.err).not.toContain(HINT);
+    });
+
+    it("never prints the proxy URL or its credentials", async () => {
+      const r = await failWith({ HTTPS_PROXY: "http://user:secret@proxy.example.org:3128" });
+      expect(r.err).toContain(HINT);
+      for (const text of [r.err, r.out]) {
+        expect(text).not.toContain("secret");
+        expect(text).not.toContain("user:");
+        expect(text).not.toContain("proxy.example.org");
+      }
+    });
+  });
+
   describe("on a pipe", () => {
     it("does not prompt, even when otherwise interactive", async () => {
       const h = harness({ interactive: true, stdinText: FAKE_TOKEN });
