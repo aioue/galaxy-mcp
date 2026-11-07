@@ -1,6 +1,7 @@
 // A safety net for every test file: whatever a test forgets to inject, the real keyring, the real
 // config directory and the developer's own settings stay out of reach. The keyring is off, the
-// config dir and HOME are an empty temp directory, and every variable the code reads is cleared.
+// config dir and HOME are an empty temp directory, and every variable the code reads, or Node reads
+// for it (the proxy and TLS ones, see leaky-env.ts), is cleared.
 // Tests that need something else set it themselves (vi.stubEnv, or an `env` they pass in), and
 // the one test that runs the real keyring child does so against a fake bus.
 //
@@ -10,6 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "vitest";
+import { LEAKY_ENV } from "./leaky-env.js";
 
 // Under the run's parent directory (global-setup.ts, which removes it at the end). The fallback
 // covers running this file without it; the afterAll removes the directory either way.
@@ -29,6 +31,7 @@ for (const name of [
   "BROWSER",
   "DISPLAY",
   "WAYLAND_DISPLAY",
+  ...LEAKY_ENV,
 ]) {
   delete process.env[name];
 }
