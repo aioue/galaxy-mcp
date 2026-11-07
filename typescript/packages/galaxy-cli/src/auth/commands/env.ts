@@ -36,6 +36,15 @@ function assign(shell: Shell, name: string, value: string): string {
   }
 }
 
+/**
+ * Print `GALAXY_URL` and `GALAXY_API_KEY`, the two variables galaxy-cli's operations and the
+ * Python galaxy-mcp server both read, so one `eval "$(gxy auth env)"` points every Galaxy tool in
+ * that shell at this login.
+ *
+ * It also puts the token in the environment of every process started from that shell, which is
+ * why the README tells agents to run `gxy <operation>` instead. An exported `GALAXY_API_KEY` is
+ * used by operations before any stored login (config.ts), so it will not follow a later `login`.
+ */
 export async function envCommand(opts: EnvOptions, deps: AuthDeps): Promise<number> {
   try {
     const shell = (opts.shell ?? "sh") as Shell;

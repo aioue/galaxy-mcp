@@ -25,8 +25,10 @@ export function isTlsError(err: Error): boolean {
  * The message for a request that never got an answer, naming the fixes that exist.
  *
  * A certificate failure usually means a private CA (set `NODE_EXTRA_CA_CERTS` to its PEM
- * file). The proxy advice is not here: it depends on the environment, so `fail` in
- * commands/common.ts adds it. The advice never includes turning certificate checking off.
+ * file; Node reads it once, at startup). The proxy advice is not here: it depends on the
+ * environment, so `fail` in commands/common.ts adds it. The advice never includes turning
+ * certificate checking off: a login that skipped verification would hand its token to whoever
+ * answered.
  */
 export function describeNetworkError(err: Error, target: string): string {
   const cause = rootCause(err);

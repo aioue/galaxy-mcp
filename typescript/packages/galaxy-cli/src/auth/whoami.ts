@@ -12,6 +12,9 @@ const PROBE_TIMEOUT_MS = 15_000;
  * sent there. A Galaxy behind a `remote_user` proxy answers an HTML login page, and a wrong
  * URL often redirects (http to https, a missing path prefix): sending a key along would hand
  * it to whatever answers. Redirects are never followed; the `Location` is offered as a fix.
+ *
+ * `/api/version` is the question because Galaxy answers it to anyone, with JSON that carries
+ * `version_major`. A 200 alone proves nothing: a login page is a 200 too.
  */
 export async function probeGalaxy(baseUrl: BaseUrl, fetchImpl: FetchImpl = globalThis.fetch, signal?: AbortSignal): Promise<void> {
   const url = `${baseUrl}/api/version`;
@@ -34,6 +37,7 @@ export async function probeGalaxy(baseUrl: BaseUrl, fetchImpl: FetchImpl = globa
         (where ? ` Did you mean the address it points to: ${stripToApiBase(where, baseUrl)}?` : ""),
     );
   }
+  // Both halves count: an error page can be JSON, and a login page can be a 200.
   let version: unknown;
   try {
     version = ((await res.json()) as { version_major?: unknown }).version_major;
@@ -64,9 +68,13 @@ const NOT_LOGGED_IN =
 
 /**
  * Ask Galaxy whose token this is, through galaxy-ops' `get_user` (`GET /api/users/current`,
- * which never follows a redirect). Galaxy answers 200 with an anonymous record when no key
- * counts, so success means a real user: JSON with an `id` and a `username` or `email`.
+ * which never follows a redirect). Galaxy 26.1 answers a key it does not know with 200 and an
+ * anonymous record that has no `username`, so a 200 is the shape of the answer rather than
+ * the answer: success means a real user, JSON with an `id` and a `username` or `email`.
  * The version probe runs first, once per Galaxy, so a token never reaches a non-Galaxy.
+ *
+ * The token goes out as `x-api-key`, as it does for every operation (galaxy-ops builds the
+ * request), so what this accepts is what `gxy <operation>` will be able to use.
  */
 export function createWhoami(fetchImpl: FetchImpl = globalThis.fetch) {
   const probed = new Map<string, Promise<void>>();
@@ -86,6 +94,7 @@ export function createWhoami(fetchImpl: FetchImpl = globalThis.fetch) {
       baseUrl,
       apiKey: token,
       fetchImpl: (input, init) => {
+        // galaxy-ops knows nothing of our signal or User-Agent, so both go on here.
         const req = new Request(input, signal ? { ...init, signal } : init);
         req.headers.set("user-agent", USER_AGENT);
         return fetchImpl(req);

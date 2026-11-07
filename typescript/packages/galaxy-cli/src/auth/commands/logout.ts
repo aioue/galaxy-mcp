@@ -5,7 +5,14 @@ export interface LogoutOptions {
   host?: string;
 }
 
-/** Revoke on the server first (device logins only), then delete locally whatever happens. */
+/**
+ * Revoke on the server first (device logins only), then delete locally whatever happens.
+ *
+ * The order is because revoking needs the token, and a failed revocation must not leave the
+ * login stored: a person who ran `logout` wants it gone from here, and is told when the server
+ * still honours the token and until when. A pasted key is only forgotten, and the output says
+ * it still works.
+ */
 export async function logoutCommand(opts: LogoutOptions, deps: AuthDeps): Promise<number> {
   const err = (s: string) => deps.io.stderr.write(`${s}\n`);
   try {
@@ -33,6 +40,8 @@ export async function logoutCommand(opts: LogoutOptions, deps: AuthDeps): Promis
     if (!login) {
       revokeProblem = `the stored token could not be read: ${unreadable}`;
     } else if (login.method === "device") {
+      // Only a device login has a revocation call to make (RFC 7009). Discovery runs again here
+      // because the store keeps no endpoints, only the login.
       try {
         const server = await deps.discover(baseUrl);
         if (!server.supportsRevocation) {
@@ -67,6 +76,8 @@ export async function logoutCommand(opts: LogoutOptions, deps: AuthDeps): Promis
       err(`! Could not revoke the token on the server (${revokeProblem}). It stays valid ${until}.`);
     }
     if (deleteProblem) {
+      // The secret may still be in the keyring, so this is a failure (1) even though the record
+      // is gone.
       err(`! ${deleteProblem}`);
       return 1;
     }

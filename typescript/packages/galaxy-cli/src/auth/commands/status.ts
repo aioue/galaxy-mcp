@@ -13,6 +13,7 @@ export interface StatusOptions {
 }
 
 const CHECK_TIMEOUT_MS = 10_000;
+/** 128 + SIGINT, which is what a shell reports for a process that Ctrl-C ended. */
 const EX_INTERRUPTED = 130;
 
 /** Settle with `p`, or reject as soon as `signal` aborts (the work behind `p` is left to end on its own). */
@@ -38,6 +39,14 @@ interface Checked {
   problem?: string;
 }
 
+/**
+ * Check each stored login against its Galaxy and say what is wrong with any that fail.
+ *
+ * Exits 1 when any login is not usable and 0 when all are: the command ran and reported on them,
+ * so this is not one of the sysexits failures. `--json` always exits 0, as gh's does, and the
+ * outcome is the `status` of each entry. Nothing stored is 77 (as `token` has it), except
+ * with `--json`, where an empty list is the answer.
+ */
 export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promise<number> {
   const err = (s: string) => deps.io.stderr.write(`${s}\n`);
   try {
@@ -70,6 +79,7 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
         checked.push({ login: summary, state: "unavailable", username: summary.username, problem: `token unavailable: ${sanitize(unreadable)}` });
         continue;
       }
+      // An expired token is not sent anywhere: the clock has already said no.
       const expiry = checkExpiry(login.expiresAt, now);
       if (expiry.state === "expired" || expiry.state === "unreadable") {
         checked.push({ login, state: "expired", username: login.username, problem: describeExpiry(login.expiresAt!, now) });
@@ -92,6 +102,8 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
           });
           continue;
         }
+        // `not_logged_in` is Galaxy refusing the token. Anything else (no answer, a 5xx) says
+        // nothing about the token, so it is an error and not "invalid".
         const invalid = e instanceof AuthError && e.kind === "not_logged_in";
         checked.push({
           login,
@@ -145,6 +157,8 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
     if (opts.showToken) {
       for (const c of checked) if (c.login.token !== undefined) deps.io.stdout.write(`${c.login.baseUrl}\t${c.login.token}\n`);
     }
+    // Operations use it before any stored login (config.ts), so a green status can be about a
+    // key nothing is using.
     if (envKey) err("\nGALAXY_API_KEY is set and takes precedence over stored logins.");
     return checked.some((c) => c.state !== "ok") ? 1 : 0;
   } catch (e) {

@@ -26,7 +26,13 @@ export interface Sources {
   storeProblem?: string;
 }
 
-/** Which Galaxy an operation talks to: `auth/host.ts`'s one rule, fed from these sources. */
+/**
+ * Which Galaxy an operation talks to: `auth/host.ts`'s one rule, fed from these sources.
+ *
+ * `forLogin` is left off. An operation has always read `.env` and the profile, and a stored token
+ * only goes to a host that matches a stored login, so those files cannot send one anywhere; it is
+ * `auth login` that must not take its host from them.
+ */
 function pickOperationHost(flags: GlobalFlags, src: Sources): string {
   const prof = flags.profile ? src.profiles[flags.profile] : undefined;
   return pickHost({
@@ -88,6 +94,7 @@ export function resolveConnection(flags: GlobalFlags, src: Sources): Connection 
   return warning ? { baseUrl: target, apiKey, warning } : { baseUrl: target, apiKey };
 }
 
+/** The stored login, if it is for this very Galaxy: compared as normalised, never as typed. */
 function matchingLogin(baseUrl: string, login: StoredLogin | undefined): StoredLogin | undefined {
   if (!login) return undefined;
   try {
