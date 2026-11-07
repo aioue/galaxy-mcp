@@ -34,7 +34,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=22.19"
+    "node": ">=24.5"
   },
   "scripts": {
     "build": "tsup",
@@ -51,11 +51,11 @@
     "typescript": ">=5.5"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.19.2",
     "esbuild": "^0.28.1",
     "tsup": "^8.3.0",
     "typescript": "^6.0.0",
-    "vitest": "^4.1.12"
+    "vitest": "5.1.0"
   },
   "peerDependenciesMeta": {
     "typescript": {

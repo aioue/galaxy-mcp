@@ -17,7 +17,7 @@ and you can use it directly to script Galaxy from TypeScript.
 npm install @galaxyproject/galaxy-ops
 ```
 
-Requires Node.js `>=22.19`.
+Requires Node.js `>=24.5`.
 
 ## Usage
 

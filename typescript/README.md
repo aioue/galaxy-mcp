@@ -39,7 +39,7 @@ code.
 
 ## Requirements
 
-- Node.js `>=22.19`
+- Node.js `>=24.5`
 - [pnpm](https://pnpm.io) `9.12` (`corepack enable` will provide it)
 - A Galaxy server URL and an API key (Galaxy: **User -> Preferences -> Manage API Key**)
 

@@ -18,6 +18,13 @@ guards: it binds to loopback unless `--allow-unauthenticated` is given, checks t
 command-line arguments are now refused rather than ignored, and an address that cannot be
 listened on (a port in use, say) is reported in one line instead of a stack trace.
 
+### Node 24.5 or later, and Vitest 5
+
+The packages now require Node `>=24.5` (it was `>=22.19`). 24.5 is the first release where
+`NODE_USE_ENV_PROXY=1` makes `fetch` honour `HTTPS_PROXY`. CI tests on Node 24 and 26, and
+releases are built on 26. Development tooling moves from Vitest 4.1.12 to 5.1.0 and `@types/node`
+to 24.x; neither changes the published packages.
+
 ### zod 4.6
 
 All three packages move from `zod ^4.3.0` to `^4.6.7`. The one visible change is in the JSON

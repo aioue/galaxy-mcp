@@ -13,7 +13,7 @@
   "bugs": "https://github.com/galaxyproject/galaxy-mcp/issues",
   "keywords": ["galaxy", "bioinformatics", "cli", "galaxy-project"],
   "type": "module",
-  "engines": { "node": ">=22.19" },
+  "engines": { "node": ">=24.5" },
   "publishConfig": {
     "access": "public"
   },
@@ -31,10 +31,10 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.19.2",
     "execa": "^9.5.0",
     "tsup": "^8.3.0",
-    "vitest": "^4.1.12",
+    "vitest": "5.1.0",
     "typescript": "^6.0.0"
   }
 }

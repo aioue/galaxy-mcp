@@ -2,7 +2,7 @@
   "name": "galaxy-mcp-typescript",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.19" },
+  "engines": { "node": ">=24.5" },
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",

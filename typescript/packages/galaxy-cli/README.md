@@ -13,7 +13,7 @@ npm install -g @galaxyproject/galaxy-cli   # provides the `galaxy-cli` command
 npx @galaxyproject/galaxy-cli --help
 ```
 
-Requires Node.js `>=22.19`.
+Requires Node.js `>=24.5`.
 
 ## Usage
 

@@ -14,7 +14,7 @@ GALAXY_URL=https://usegalaxy.org/ GALAXY_API_KEY=your-api-key \
 # -> "galaxy-mcp: connected on stdio"
 ```
 
-Requires Node.js `>=22.19`. The server reads `GALAXY_URL` and `GALAXY_API_KEY`
+Requires Node.js `>=24.5`. The server reads `GALAXY_URL` and `GALAXY_API_KEY`
 from the environment and speaks MCP over stdio.
 
 ## Use with an MCP client
