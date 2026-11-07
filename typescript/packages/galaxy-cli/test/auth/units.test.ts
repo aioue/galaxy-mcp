@@ -12,12 +12,18 @@ import { exitQuietlyOnEpipe } from "../../src/auth/epipe";
 import { normalizeBaseUrl } from "../../src/auth/base-url";
 import { AuthError } from "../../src/auth/types";
 
+// The order is the usual one for a CLI that follows the XDG Base Directory spec (gh does the
+// same with its own variable). `env` and `home` are passed in, so no test reads the real ones.
 describe("configDir", () => {
   it("prefers GXY_CONFIG_DIR, then XDG_CONFIG_HOME, then ~/.config", () => {
     expect(configDir({ GXY_CONFIG_DIR: "/x", XDG_CONFIG_HOME: "/xdg" }, "/home/u")).toBe("/x");
     expect(configDir({ XDG_CONFIG_HOME: "/xdg" }, "/home/u")).toBe("/xdg/gxy");
     expect(configDir({}, "/home/u")).toBe("/home/u/.config/gxy");
   });
+  // The XDG spec says a relative path in `XDG_CONFIG_HOME` is invalid and must be ignored, and a
+  // relative path would move the credential file with the working directory. Only that variable
+  // is checked for being relative: a relative `GXY_CONFIG_DIR` is used as given, which this does
+  // not cover.
   it("treats empty and relative values as unset", () => {
     expect(configDir({ GXY_CONFIG_DIR: "", XDG_CONFIG_HOME: "rel" }, "/home/u")).toBe("/home/u/.config/gxy");
   });
@@ -29,10 +35,15 @@ describe("hostsFile", () => {
   });
 });
 
+// The clock is the harness's fixed `DAY`, never the real one, so a boundary can be tested to the
+// millisecond. `at(ms)` is an `expiresAt` that many milliseconds after it.
 const now = new Date(DAY);
 const at = (ms: number) => new Date(now.getTime() + ms).toISOString();
 
 describe("expiry helper", () => {
+  // The offsets are literals and not derived from `EXPIRY_MARGIN_MS`, so moving the margin has to
+  // change a test. A token inside the margin is refused because it must still be good for the
+  // operation it is handed to; the row at exactly 60 s is the boundary (`<=`).
   it("treats a login as expired 60 s before expiresAt", () => {
     expect(EXPIRY_MARGIN_MS).toBe(60_000);
     expect(isExpired(at(61_000), now)).toBe(false);
@@ -41,10 +52,14 @@ describe("expiry helper", () => {
     expect(isExpired(at(-1), now)).toBe(true);
     expect(isExpired(null, now)).toBe(false);
   });
+  // A hand-edited or corrupt `hosts.yml` must not turn a login into one that never expires, which
+  // is what treating a bad date like `null` would do.
   it("treats an unparseable expiresAt as expired, never as non-expiring", () => {
     expect(checkExpiry("tomorrow", now)).toEqual({ state: "unreadable" });
     expect(isExpired("tomorrow", now)).toBe(true);
   });
+  // `formatExpiry` prints a value from a file a person may have edited, so it must cope with any
+  // string and must not pass a terminal escape through.
   it("formatExpiry never throws", () => {
     expect(formatExpiry("tomorrow")).toContain("unreadable");
     expect(formatExpiry("\u001b[2Jx")).not.toContain("\u001b");
@@ -57,10 +72,16 @@ describe("expiry helper", () => {
   });
 });
 
+/** The error Node raises on a write to a pipe whose reader has gone. */
 const epipe = () => Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+/** Any other stream error, which the handler must not swallow. */
 const eio = () => Object.assign(new Error("disk"), { code: "EIO" });
 
+// The streams here are `PassThrough`s and `exit` is a function that records its code, so the
+// process under test is never ended. `codes` is everything that would have been passed to it.
 describe("exitQuietlyOnEpipe", () => {
+  // Exit 0, because the reader leaving (`| head -c1`) is not a failure and the output was wanted.
+  // An EPIPE is the only error swallowed: anything else rethrows, or a real fault would vanish.
   it("on stdout exits quietly with 0, and rethrows any other error", () => {
     const stdout = new PassThrough();
     const codes: number[] = [];
@@ -70,6 +91,9 @@ describe("exitQuietlyOnEpipe", () => {
     expect(() => stdout.emit("error", eio())).toThrow("disk");
   });
 
+  // A closed stderr is different: the login or revoke is still running, and exiting 0 would report
+  // success for work that has not finished. So the run goes on with stderr silenced, and its own
+  // exit code still says how it went. `stderr.read()` being null shows the later write went nowhere.
   it("on stderr does not exit, silences later stderr writes, and rethrows any other error", () => {
     const [stdout, stderr] = [new PassThrough(), new PassThrough()];
     const codes: number[] = [];
@@ -81,8 +105,13 @@ describe("exitQuietlyOnEpipe", () => {
     expect(() => stderr.emit("error", eio())).toThrow("disk");
   });
 
-  // The one test with a real pipe. It needs bash and head, and Node able to load the module's
-  // TypeScript source directly (Node 22.19 or later, which `engines` requires).
+  // The one test with a real pipe. The tests above inject their streams, so they cannot show that
+  // Node really raises EPIPE here and that the process then ends cleanly rather than with an
+  // uncaught exception and a stack trace on stderr. `head -c1` closes the pipe after one byte, and
+  // the writer sends about 55 MB, far more than a pipe holds, so it must hit the closed pipe.
+  // `PIPESTATUS[0]` is the writer's own exit code, which `$?` would replace with head's. It needs
+  // bash and head, and Node able to load the module's TypeScript source directly (Node 22.19 or
+  // later, which `engines` requires).
   it.skipIf(process.platform === "win32")("a real closed pipe ends the process quietly, with no stack trace", async () => {
     const dir = await mkdtemp(join(tmpdir(), "gxy-epipe-"));
     try {
@@ -108,6 +137,8 @@ process.stdout.write("\\n");`,
   });
 });
 
+// The result is the key every stored login is filed under, so these expectations are written out
+// in full: a change to the normal form would silently re-key stored logins, and should fail here.
 describe("normalizeBaseUrl", () => {
   it.each([
     ["Host.EXAMPLE", "https://host.example"],
@@ -128,7 +159,11 @@ describe("normalizeBaseUrl", () => {
     expect(normalizeBaseUrl(input)).toBe(expected);
   });
 
-  // The result is a credential key and `resolveHost` normalises a stored key again, so it must be a fixed point.
+  // The result is a credential key and `resolveHost` normalises a stored key again, so it must be a
+  // fixed point. A doubled `/api` once normalised to a single `/api`, and that to the bare host, so
+  // `logout` and `status` looked for a key that was never stored; a longer run of the idempotence
+  // property in properties.test.ts found it, and the examples pin it here. The last row shows
+  // that only trailing segments go: a leading `/api` is part of the path.
   it.each([
     ["https://h.example/api/api", "https://h.example"],
     ["https://h.example/api//api/", "https://h.example"],
@@ -140,11 +175,15 @@ describe("normalizeBaseUrl", () => {
     expect(normalizeBaseUrl(once)).toBe(once);
   });
 
+  // Two paths on one host are two Galaxies (a Galaxy can be served under a prefix), so only an
+  // exact `/api` segment is the API root.
   it("keeps only an exact /api suffix: a longer segment is a different Galaxy", () => {
     expect(normalizeBaseUrl("https://host.example/apiary")).toBe("https://host.example/apiary");
     expect(normalizeBaseUrl("https://host.example/api/v2")).toBe("https://host.example/api/v2");
   });
 
+  // Refused, not trimmed: a stray `\r` from a file with Windows line endings would otherwise become
+  // a quietly different key. The inputs include U+0085 (a C1 control) and a space inside the host.
   it.each(["host.example\r", "host.example\n", "host.\u001bexample", "host.example\u0000", "ho st.example", "host.example/a b", "\u0085host.example"])(
     "refuses control characters and whitespace: %j",
     (input) => {
@@ -152,6 +191,8 @@ describe("normalizeBaseUrl", () => {
     },
   );
 
+  // A password in the URL would be stored in `hosts.yml` and in the keyring's service name, which
+  // is built from this key.
   it("refuses userinfo, whatever the form", () => {
     expect(() => normalizeBaseUrl("https://user:pw@host.example")).toThrow(/credentials/);
     expect(() => normalizeBaseUrl("user@host.example")).toThrow(/credentials/);
@@ -162,7 +203,10 @@ describe("normalizeBaseUrl", () => {
     expect(() => normalizeBaseUrl("ftp://host.example")).toThrow(AuthError);
   });
 
-  // The gate that decides whether a token may cross the network in clear text: pin both sides.
+  // The gate that decides whether a token may cross the network in clear text, so both sides are
+  // pinned: what it accepts here, and (next) the hosts that only look like loopback. Dropping the
+  // `$` of the 127.x pattern, for one, would send a token over http to
+  // `127.0.0.1.evil.example`.
   it.each([
     ["http://localhost", "http://localhost"],
     ["http://localhost:8080", "http://localhost:8080"],
@@ -173,6 +217,9 @@ describe("normalizeBaseUrl", () => {
     expect(normalizeBaseUrl(input)).toBe(expected);
   });
 
+  // Each looks like loopback to a careless check and is not: a name an attacker could register, a
+  // path that contains one, a neighbouring address (`[::2]`, and `0.0.0.0`, which is the
+  // unspecified address), or userinfo in front of another host.
   it.each([
     ["http://127.0.0.1.evil.example", "insecure"],
     ["http://localhost.evil.example", "insecure"],
