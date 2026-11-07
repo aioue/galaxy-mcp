@@ -63,14 +63,15 @@ describe("a rejected argument is a usage error, not an outage", () => {
 describe("credential errors exit by kind", () => {
   const tmp = useTempDir("gxy-exit-");
   beforeEach(async () => {
-    vi.stubEnv("GALAXY_URL", "");
-    vi.stubEnv("GALAXY_API_KEY", "");
-    vi.stubEnv("HOME", tmp.path); // no ~/.planemo.yml
-    vi.stubEnv("GXY_NO_KEYRING", "1");
+    // safe-env keeps the environment clean; this test also needs its own empty HOME (no
+    // ~/.planemo.yml), config dir and working directory (loadSources reads `.env` from it).
+    vi.stubEnv("HOME", tmp.path);
     vi.stubEnv("GXY_CONFIG_DIR", join(tmp.path, "cfg"));
+    vi.spyOn(process, "cwd").mockReturnValue(tmp.path);
     await mkdir(join(tmp.path, "cfg"), { mode: 0o700 });
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     process.exitCode = 0;
   });
@@ -78,8 +79,8 @@ describe("credential errors exit by kind", () => {
   const host = (url: string, expires: string | null) =>
     `  ${url}:\n    username: alice\n    method: device\n    scopes: []\n    expires_at: ${expires === null ? "null" : `"${expires}"`}\n    obtained_at: "2026-01-01T00:00:00.000Z"\n    storage: file\n    token: FAKE-TOKEN\n`;
 
-  async function run(hosts: string) {
-    await writeFile(join(tmp.path, "cfg", "hosts.yml"), `hosts:\n${hosts}`, { mode: 0o600 });
+  async function run(hosts: string, file = `hosts:\n${hosts}`) {
+    await writeFile(join(tmp.path, "cfg", "hosts.yml"), file, { mode: 0o600 });
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     process.exitCode = 0;
     try {
@@ -104,5 +105,14 @@ describe("credential errors exit by kind", () => {
     const r = await run("  {}\n");
     expect(r.exitCode).toBe(64);
     expect(r.stderr).toMatch(/No Galaxy credentials/);
+  });
+  it("warns about a broken store and carries on with the other key, without calling it a usage error", async () => {
+    // A key in `.env` (the working directory is the temp dir) is used, and the unreadable
+    // hosts.yml is a warning: the person must learn the store is broken, not that they typed something wrong.
+    await writeFile(join(tmp.path, ".env"), "GALAXY_URL=http://127.0.0.1:1\nGALAXY_API_KEY=FAKE-DOTENV-KEY\n");
+    const r = await run("", "hosts: [unclosed");
+    expect(r.stderr).toContain("Warning:");
+    expect(r.stderr).toContain("hosts.yml");
+    expect(r.exitCode).not.toBe(64);
   });
 });

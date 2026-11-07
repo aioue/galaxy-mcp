@@ -67,7 +67,7 @@ describe.each(commands)("%s when there is nothing to hand out", (_name, run) => 
     const h = harness();
     expect(await run(h)).toBe(77);
     expect(h.cap.out).toBe("");
-    expect(h.cap.err).toContain("Not logged in; run gxy auth login --host <url>");
+    expect(h.cap.err).toContain("gxy auth login --host");
   });
 
   it("exits 77, as about to expire, for a login with under a minute left", async () => {

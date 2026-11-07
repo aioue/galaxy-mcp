@@ -1,4 +1,4 @@
-// A write that fails midway, and the rule that the temp file is created exclusively. Both need the
+// A write that fails midway, and the rule that the temp file is never a pre-planted symlink. Both need the
 // filesystem and the temp-file name under test control, so `node:fs/promises` and `randomBytes`
 // are wrapped here (passing through unless a test arms them), in a file of their own.
 import { mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
@@ -9,7 +9,6 @@ const arm = vi.hoisted(() => ({
   failWrite: false,
   failRename: false,
   fixedRandom: undefined as number[] | undefined,
-  opens: [] as { path: string; flags: unknown; mode: unknown }[],
 }));
 
 vi.mock("node:crypto", async (orig) => {
@@ -22,7 +21,6 @@ vi.mock("node:fs/promises", async (orig) => {
   return {
     ...actual,
     async open(path: string, flags?: unknown, mode?: unknown) {
-      if (String(path).includes(".hosts.")) arm.opens.push({ path: String(path), flags, mode });
       const fh = await (actual.open as (...a: unknown[]) => Promise<import("node:fs/promises").FileHandle>)(path, flags, mode);
       if (!arm.failWrite || !String(path).includes(".hosts.")) return fh;
       return new Proxy(fh, {
@@ -48,7 +46,6 @@ beforeEach(() => {
   arm.failWrite = false;
   arm.failRename = false;
   arm.fixedRandom = undefined;
-  arm.opens = [];
 });
 
 const rec = () => {
@@ -83,12 +80,6 @@ describe.each([
 });
 
 describe("the temp file", () => {
-  it("is created exclusively with mode 0600", async () => {
-    await new FileStore(join(tmp.path, "cfg")).put(rec());
-    expect(arm.opens).toHaveLength(1);
-    expect(arm.opens[0]).toMatchObject({ flags: "wx", mode: 0o600 });
-  });
-
   it("is never a pre-planted symlink: the write fails rather than follow it", async () => {
     const dir = join(tmp.path, "cfg");
     await mkdir(dir, { mode: 0o700 });

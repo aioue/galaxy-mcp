@@ -62,7 +62,7 @@ describe("permissions", () => {
     expect(await readdir(s.dir)).toEqual(["hosts.yml"]);
   });
 
-  it("still writes 0600 and 0700 under a umask of 000", async () => {
+  it("still creates the directory 0700 under a umask of 000", async () => {
     const s = new FileStore(dirOf());
     const old = process.umask(0o000);
     try {
@@ -70,8 +70,22 @@ describe("permissions", () => {
     } finally {
       process.umask(old);
     }
-    expect(await mode(s.path)).toBe(0o600);
     expect(await mode(s.dir)).toBe(0o700);
+  });
+
+  // Under 0277 a new file would be 0400, so only the explicit chmod brings it to 0600 (under 000
+  // the creation mode alone would already be right). The directory exists first: 0277 would
+  // otherwise make it unwritable.
+  it("still writes the file 0600 under a restrictive umask", async () => {
+    const s = new FileStore(dirOf());
+    await mkdir(s.dir, { mode: 0o700 });
+    const old = process.umask(0o277);
+    try {
+      await s.put(rec());
+    } finally {
+      process.umask(old);
+    }
+    expect(await mode(s.path)).toBe(0o600);
   });
 
   it("repairs a looser file on read and a looser directory on write, warning each time", async () => {

@@ -86,7 +86,7 @@ describe("when there is no usable login or the server fails", () => {
 });
 
 describe("login", () => {
-  it("never prints the token or the device code, whether it succeeds, is refused, or cannot store", async () => {
+  it("never prints the token, whether it succeeds, is refused, or cannot store", async () => {
     const device = harness();
     const pasted = harness({ stdinText: `${FAKE_TOKEN}\n` });
     const refused = harness({ stdinText: `${FAKE_TOKEN}\n` });
@@ -103,7 +103,6 @@ describe("login", () => {
     for (const h of [device, pasted, refused, unstorable]) {
       expect(h.cap.out).toBe("");
       expect(h.cap.err).not.toContain(FAKE_TOKEN);
-      expect(h.cap.err).not.toContain(h.server.pending.deviceCode);
     }
   });
 });

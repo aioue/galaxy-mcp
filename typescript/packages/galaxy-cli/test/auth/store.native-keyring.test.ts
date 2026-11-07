@@ -27,7 +27,7 @@ vi.mock("node:child_process", async () => {
 
 const { createCredentialStore } = await import("../../src/auth/store");
 const { loadSourcesAsync, resolveConnection } = await import("../../src/config");
-const { FAKE_TOKEN, HOST, fakeLogin, useTempDir } = await import("./harness");
+const { DAY, FAKE_TOKEN, HOST, fakeLogin, useTempDir } = await import("./harness");
 
 const tmp = useTempDir("gxy-nk-");
 beforeEach(() => {
@@ -65,7 +65,7 @@ describe("the native keyring is touched only when a record needs it", () => {
     expect((await store.put(login, { insecureStorage: true })).storage).toBe("file");
     expect(await store.list()).toHaveLength(1);
     expect((await store.get(login.baseUrl))?.token).toBe(login.token);
-    const src = await loadSourcesAsync({}, { store, base: { env: {}, dotenv: {}, profiles: {} } });
+    const src = await loadSourcesAsync({}, { store, now: new Date(DAY), base: { env: {}, dotenv: {}, profiles: {} } });
     expect(resolveConnection({}, src).apiKey).toBe(login.token);
     expect(await store.delete(login.baseUrl)).toBe(true);
     expect(state.spawned).toBe(0);

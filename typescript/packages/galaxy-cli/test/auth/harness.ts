@@ -141,8 +141,6 @@ export class FakePending implements PendingDeviceLogin {
   userCode = "WDJB-MJHT";
   verificationUri = "https://dev.galaxy.example.org/login/device";
   expiresAt: Date;
-  /** The device code must never appear in output; tests grep for it. */
-  readonly deviceCode = "SECRET-DEVICE-CODE-9999";
   outcome: TokenGrant | AuthError | "hang" = { accessToken: FAKE_TOKEN, expiresIn: 28_680, scopes: ["histories:read"] };
   constructor(now: Date) {
     this.expiresAt = new Date(now.getTime() + (14 * 60 + 52) * 1000);

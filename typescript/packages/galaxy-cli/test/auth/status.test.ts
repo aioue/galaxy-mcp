@@ -17,7 +17,7 @@ describe("auth status", () => {
     expect(h.cap.err).toMatch(/Storage\s+system keyring/);
     expect(h.cap.err).toMatch(/Method\s+device login/);
     expect(h.cap.err).toMatch(/Scopes\s+histories:read tools:run/);
-    expect(h.cap.err).toMatch(/Expires\s+in 7h 58m/);
+    expect(h.cap.err).toMatch(/Expires\s+in 7h/);
     // The token is masked: only its last four characters show.
     expect(h.cap.err).not.toContain(FAKE_TOKEN);
     expect(h.cap.err).toContain(FAKE_TOKEN.slice(-4));

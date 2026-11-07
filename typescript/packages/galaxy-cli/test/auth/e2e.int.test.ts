@@ -5,20 +5,19 @@
  * keyring is off (`GXY_NO_KEYRING`) and HOME is a temp dir too, so nothing here touches the
  * developer's real logins.
  *
- * The CLI is built here into a private cache directory. galaxy-ops is not: it must already be
- * built (`corepack pnpm --filter @galaxyproject/galaxy-ops build`), and the test fails at
- * once, saying so, when its build is missing or older than its sources.
+ * The CLI is built here into a private cache directory, and galaxy-ops (which the binary
+ * imports at run time) is built first, so a stale or missing build cannot be what is tested.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execa, type ResultPromise } from "execa";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import { startFakeGalaxy, type Approval, type FakeGalaxy } from "../support/fake-galaxy";
 
 const pkgDir = fileURLToPath(new URL("../..", import.meta.url));
-const opsDir = fileURLToPath(new URL("../../../galaxy-ops", import.meta.url));
 // Built into a private directory inside the package (so `galaxy-ops` still resolves from
 // node_modules), never into `dist`: `bin.smoke.int.test.ts` reads that.
 const outDir = join(pkgDir, "node_modules", ".cache", "gxy-e2e");
@@ -30,25 +29,9 @@ type Name = (typeof NAMES)[number];
 let work: string | undefined;
 const bins: Record<string, string> = {};
 
-async function newestMtime(dir: string): Promise<number> {
-  let newest = 0;
-  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
-    if (entry.isFile()) newest = Math.max(newest, (await stat(join(entry.parentPath, entry.name))).mtimeMs);
-  }
-  return newest;
-}
-
-async function requireFreshOpsBuild(): Promise<void> {
-  const rebuild = "Run: corepack pnpm --filter @galaxyproject/galaxy-ops build";
-  const built = await stat(join(opsDir, "dist", "index.js")).catch(() => undefined);
-  if (!built) throw new Error(`galaxy-ops has no build, which the binary imports at run time. ${rebuild}`);
-  if (built.mtimeMs < (await newestMtime(join(opsDir, "src")))) {
-    throw new Error(`galaxy-ops' build is older than its sources, so the binary would run stale code. ${rebuild}`);
-  }
-}
-
 beforeAll(async () => {
-  await requireFreshOpsBuild();
+  // The binary imports galaxy-ops' build at run time, so build it too rather than trust a cached one.
+  await execa("corepack", ["pnpm", "--filter", "@galaxyproject/galaxy-ops", "build"], { cwd: pkgDir, env: buildEnv });
   await execa("corepack", ["pnpm", "exec", "tsup", "--out-dir", outDir], { cwd: pkgDir, env: buildEnv });
   work = await mkdtemp(join(tmpdir(), "gxy-e2e-"));
   for (const name of NAMES) {
@@ -56,7 +39,7 @@ beforeAll(async () => {
     bins[name] = join(work, "bin", name, name);
     await symlink(dist, bins[name]!);
   }
-}, 180_000);
+}, 240_000);
 
 afterAll(async () => {
   // `work` is unset when beforeAll failed: leave that failure as the one that is reported.
@@ -85,10 +68,10 @@ describe("auth, end to end", () => {
 
   const cliEnv = (extra: Record<string, string> = {}) => ({ PATH: process.env.PATH ?? "", HOME: work!, GXY_CONFIG_DIR: configDir, GXY_NO_KEYRING: "1", ...extra });
 
-  const run = (args: string[], opts: { env?: Record<string, string>; input?: string; name?: Name } = {}) =>
+  const run = (args: string[], opts: { env?: Record<string, string>; input?: string; name?: Name; cwd?: string } = {}) =>
     // Typed as text output: `input` and `stdin` below are both conditional, which widens execa's result.
     execa(process.execPath, [bins[opts.name ?? "gxy"]!, ...args], {
-      cwd: work,
+      cwd: opts.cwd ?? work,
       extendEnv: false,
       env: cliEnv(opts.env),
       input: opts.input,
@@ -101,9 +84,9 @@ describe("auth, end to end", () => {
    * Start a device login, approve its code on the fake while the CLI polls, and wait for it.
    * The child never outlives the call, whatever happens in between.
    */
-  async function deviceLogin(g: FakeGalaxy, approval: Approval | "expire" = {}, opts: { env?: Record<string, string> } = {}) {
+  async function deviceLogin(g: FakeGalaxy, approval: Approval | "expire" = {}, opts: { env?: Record<string, string>; cwd?: string; noHost?: boolean } = {}) {
     const before = new Set(g.pendingCodes());
-    const child = run(["auth", "login", "--host", g.baseUrl], opts);
+    const child = run(opts.noHost ? ["auth", "login"] : ["auth", "login", "--host", g.baseUrl], opts);
     try {
       let code: string | undefined;
       await vi.waitFor(
@@ -115,7 +98,13 @@ describe("auth, end to end", () => {
       );
       if (approval === "expire") g.expire(code!);
       else g.approve(code!, { expiresIn: 3600, ...approval });
-      return await child;
+      const result = await child;
+      // The device code is the secret the CLI polls with: it must never be shown to anyone.
+      for (const deviceCode of g.deviceCodes()) {
+        expect(result.stdout, "stdout").not.toContain(deviceCode);
+        expect(result.stderr, "stderr").not.toContain(deviceCode);
+      }
+      return result;
     } finally {
       child.kill();
       await child;
@@ -264,4 +253,101 @@ describe("auth, end to end", () => {
     expect(r.stdout.trim()).toBe("0");
     expect(await readFile(errFile, "utf8")).toBe("");
   }, 60_000);
+
+  describe("login never takes its host from a .env in the working directory", () => {
+    /** A working directory whose `.env` names `url` as the Galaxy. */
+    async function cwdWithDotenv(url: string): Promise<string> {
+      const dir = await mkdtemp(join(work!, "cwd-"));
+      await writeFile(join(dir, ".env"), `GALAXY_URL=${url}\n`);
+      return dir;
+    }
+
+    it("a pasted key with no --host is a usage error, and the .env's Galaxy is never contacted", async () => {
+      const decoy = await galaxyWith();
+      const cwd = await cwdWithDotenv(decoy.baseUrl);
+      const token = decoy.issueToken();
+      const login = await run(["auth", "login", "--with-token"], { cwd, input: `${token}\n` });
+      expect(login.exitCode, login.stderr).toBe(64);
+      expect(decoy.requests).toEqual([]);
+      expect(login.stdout + login.stderr).not.toContain(token);
+      await expect(readFile(join(configDir, "hosts.yml"), "utf8")).rejects.toThrow();
+    }, 30_000);
+
+    it("the device flow goes to the stored login, says it ignored the .env, and never contacts the .env's Galaxy", async () => {
+      const decoy = await galaxyWith();
+      expect((await deviceLogin(galaxy)).exitCode).toBe(0);
+      const cwd = await cwdWithDotenv(decoy.baseUrl);
+      const seen = galaxy.requests.length;
+      const login = await deviceLogin(galaxy, {}, { cwd, noHost: true });
+      expect(login.exitCode, login.stderr).toBe(0);
+      expect(login.stderr).toContain("Ignoring GALAXY_URL from .env");
+      expect(galaxy.requests.length).toBeGreaterThan(seen);
+      expect(decoy.requests).toEqual([]);
+    }, 60_000);
+  });
+
+  describe("Ctrl-C", () => {
+    it("aborts the wait for approval: exit 130, \"Cancelled.\", nothing stored, and the process is gone", async () => {
+      const child = run(["auth", "login", "--host", galaxy.baseUrl]);
+      try {
+        await vi.waitFor(
+          () => {
+            if (galaxy.pendingCodes().length === 0) throw new Error("the CLI never asked for a device code");
+          },
+          { timeout: 15_000, interval: 20 },
+        );
+        child.kill("SIGINT");
+        const r = await child;
+        expect(r.signal).toBeUndefined(); // handled, not killed by the signal
+        expect(r.exitCode).toBe(130);
+        expect(r.stderr).toContain("Cancelled.");
+        await expect(readFile(join(configDir, "hosts.yml"), "utf8")).rejects.toThrow();
+      } finally {
+        child.kill();
+        await child;
+      }
+    }, 30_000);
+  });
+
+  // The keyring helper is a second built file (dist/keyring-child.js). Every other case turns the
+  // keyring off, so this is the one that would notice it missing from the build.
+  describe.skipIf(process.platform !== "linux")("the real keyring helper, against a session bus that never answers", () => {
+    it("reports that the keyring did not answer, within the timeout plus a margin, and exits", async (ctx) => {
+      const dir = await mkdtemp(join(tmpdir(), "gxy-bus-"));
+      const sockets = new Set<Socket>();
+      const server = createServer((c) => {
+        sockets.add(c);
+        c.on("data", () => {});
+        c.on("error", () => {});
+      });
+      try {
+        const sock = join(dir, "bus.sock");
+        try {
+          await new Promise<void>((res, rej) => {
+            server.once("error", rej);
+            server.listen(sock, res);
+          });
+        } catch {
+          ctx.skip(); // no unix sockets here
+        }
+        // A login whose token lives in the keyring: the record is in hosts.yml, the token is not.
+        await mkdir(configDir, { mode: 0o700 });
+        await writeFile(
+          join(configDir, "hosts.yml"),
+          `hosts:\n  ${galaxy.baseUrl}:\n    username: fake-user\n    method: device\n    scopes: []\n    expires_at: null\n    obtained_at: "2026-01-01T00:00:00.000Z"\n    storage: keyring\n`,
+          { mode: 0o600 },
+        );
+        const t0 = Date.now();
+        const r = await run(["auth", "token"], { env: { GXY_NO_KEYRING: "", DBUS_SESSION_BUS_ADDRESS: `unix:path=${sock}` } });
+        expect(r.exitCode, r.stderr).toBe(77);
+        expect(r.stderr).toContain("did not answer");
+        expect(r.stdout).toBe("");
+        expect(Date.now() - t0).toBeLessThan(5000 + 15_000); // the 5 s timeout, plus a loaded machine
+      } finally {
+        for (const c of sockets) c.destroy();
+        server.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    }, 40_000);
+  });
 });

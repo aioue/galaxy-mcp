@@ -351,15 +351,6 @@ describe("buildProgram", () => {
   });
 });
 
-/**
- * The names this surface gives an op's inputs.
- *
- * The MCP server advertises the same parameters under the Python spelling (see
- * `galaxy-mcp/src/wire-names.ts`), and that rename stops there: a flag is the kebab-case of
- * the op's own key, a positional is the key itself, and neither moved when the other surface
- * was renamed. Derived here rather than imported from `flagName`, so a change to the
- * derivation is a failure rather than an agreement.
- */
 describe("programName", () => {
   it("is gxy only when invoked as gxy", () => {
     expect(programName("/usr/local/bin/gxy")).toBe("gxy");
@@ -370,6 +361,15 @@ describe("programName", () => {
   });
 });
 
+/**
+ * The names this surface gives an op's inputs.
+ *
+ * The MCP server advertises the same parameters under the Python spelling (see
+ * `galaxy-mcp/src/wire-names.ts`), and that rename stops there: a flag is the kebab-case of
+ * the op's own key, a positional is the key itself, and neither moved when the other surface
+ * was renamed. Derived here rather than imported from `flagName`, so a change to the
+ * derivation is a failure rather than an agreement.
+ */
 describe("the names the CLI gives an op's inputs", () => {
   const commands = new Map(
     buildProgram({ makeContext: ctxFactory }).commands.map((c) => [c.name(), c]),

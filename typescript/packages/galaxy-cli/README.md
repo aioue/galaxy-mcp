@@ -50,7 +50,8 @@ gxy get_user                                  # operations use the stored login,
 gxy auth logout                               # revoke the token and delete it
 ```
 
-If the Galaxy has the device flow switched off, or you already have a key, pipe it in:
+If the Galaxy has the device flow switched off (`gxy` says it "does not offer device login yet"
+and prints the command to use), or you already have a key, pipe it in:
 `printf %s "$KEY" | gxy auth login --host <url> --with-token`.
 
 | Command | Does |
@@ -66,9 +67,14 @@ Tokens live in the system keyring when there is one, otherwise in `hosts.yml` in
 directory (`$GXY_CONFIG_DIR`, else `~/.config/gxy`), readable only by you. A `GALAXY_API_KEY`
 (or `--api-key`) still wins over a stored login.
 
+A token that carries admin rights is only ever stored in the system keyring. With no keyring,
+`gxy auth login` refuses and stores nothing, unless you add `--insecure-storage` to put it in
+`hosts.yml`.
+
 | Variable | Does |
 | --- | --- |
 | `GXY_CONFIG_DIR` | Where `hosts.yml` lives (default `~/.config/gxy`; `$XDG_CONFIG_HOME/gxy` when that is set) |
+| `GXY_OAUTH_CLIENT_ID` | The OAuth client id presented to the Galaxy during login (default `galaxy-cli`), for a Galaxy that registers clients by name |
 | `GXY_NO_KEYRING` | `1` never touches the system keyring: tokens go to `hosts.yml`, with a warning. Use it on a box whose keyring is broken or locked, to skip the wait |
 
 A login counts as expired a minute before its expiry time, so a token that passes `auth token`

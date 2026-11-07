@@ -73,9 +73,10 @@ export interface RecordedRequest {
   form: Record<string, string>;
 }
 
-/** How `/.well-known/oauth-authorization-server...` answers. */
+/** How `/api/version` answers. */
 export type VersionMode = "ok" | "redirect" | "html";
 
+/** How `/.well-known/oauth-authorization-server...` answers. */
 export type MetadataMode = "ok" | "not-found" | "not-json" | "malformed" | "wrong-issuer";
 
 export interface FakeGalaxy {
@@ -86,6 +87,8 @@ export interface FakeGalaxy {
   requestsTo(suffix: string): RecordedRequest[];
   /** User codes issued and not yet approved, denied or expired, oldest first. */
   pendingCodes(): string[];
+  /** Every device code (the secret one the CLI polls with) issued so far, in order. */
+  deviceCodes(): string[];
   approve(userCode: string, approval?: Approval): void;
   deny(userCode: string): void;
   /** The code stops working: the token endpoint answers `expired_token`. */
@@ -353,6 +356,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     baseUrl,
     requests,
     requestsTo: (suffix) => requests.filter((r) => new URL(r.url, "http://x").pathname.endsWith(suffix)),
+    deviceCodes: () => [...devices.values()].map((d) => d.deviceCode),
     pendingCodes: () => [...devices.values()].filter((d) => d.state === "pending").map((d) => d.userCode),
     approve(userCode, approval = {}) {
       const e = entryFor(userCode);

@@ -97,13 +97,16 @@ describe("nativeBackend (stub child)", () => {
       import { writeFileSync } from "node:fs";
       writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
       setInterval(() => {}, 1000);`);
-    const t0 = Date.now();
-    await expect(new KeyringStore(nativeBackend({ script, env, timeoutMs: 300 }), 300).get(baseUrl, "alice")).rejects.toThrow(/did not answer/);
-    expect(Date.now() - t0).toBeLessThan(2000);
+    // The backend's timeout is shorter than the store's, so it is the layer that gives up. It is
+    // wide enough for a loaded machine to start Node and write the pid file.
+    const call = new KeyringStore(nativeBackend({ script, env, timeoutMs: 2500 }), 6000).get(baseUrl, "alice");
+    const outcome = expect(call).rejects.toThrow(/did not answer a get within 2500 ms/);
+    await vi.waitFor(async () => expect(Number(await readFile(pidFile, "utf8"))).toBeGreaterThan(0), { timeout: 2000, interval: 20 });
     const pid = Number(await readFile(pidFile, "utf8"));
+    await outcome;
     // SIGKILL is delivered at once but the process takes a moment to be reaped.
-    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow());
-  });
+    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 5000 });
+  }, 20_000);
 
   it("maps garbage, silence and a crash to unavailable", async () => {
     for (const body of [`process.stdout.write("not json")`, `process.exit(3)`, `process.stdout.write('{"ok":"yes"}')`]) {
@@ -179,7 +182,7 @@ describe("keyring-child (stub native module)", () => {
 // The real child (keyring-child.ts run as source) against a fake session bus that accepts the
 // connection and never answers: the case that used to hang the CLI for good.
 describe.skipIf(process.platform !== "linux")("real child against a bus that never answers", () => {
-  it("returns 'did not answer' within the timeout plus a margin, and the process exits", async () => {
+  it("returns 'did not answer' within the timeout plus a margin, and the process exits", async (ctx) => {
     const dir = await mkdtemp(join(tmpdir(), "gxy-bus-"));
     const sock = join(dir, "bus.sock");
     const sockets = new Set<Socket>();
@@ -188,7 +191,7 @@ describe.skipIf(process.platform !== "linux")("real child against a bus that nev
       try {
         await new Promise<void>((res, rej) => { server.once("error", rej); server.listen(sock, res); });
       } catch {
-        return; // no unix sockets here
+        ctx.skip(); // no unix sockets here
       }
       const runner = join(dir, "runner.mjs");
       const store = pathToFileURL(join(__dirname, "../../src/auth/keyring-store.ts")).href;
@@ -209,7 +212,7 @@ describe.skipIf(process.platform !== "linux")("real child against a bus that nev
       });
       expect(out.stdout).toMatch(/did not answer a read within 800 ms/);
       expect(out.code).toBe(0);
-      expect(Date.now() - t0).toBeLessThan(800 + 3000);
+      expect(Date.now() - t0).toBeLessThan(800 + 5000);
     } finally {
       for (const s of sockets) s.destroy();
       server.close();

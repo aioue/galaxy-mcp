@@ -31,7 +31,8 @@ describe("auth logout", () => {
     breakIt(h);
     expect(await logoutCommand({}, h.deps)).toBe(0);
     expect(await h.store.get(HOST)).toBeNull();
-    expect(h.cap.err).toContain(`Could not revoke the token on the server (${why})`);
+    expect(h.cap.err).toContain("Could not revoke the token on the server");
+    expect(h.cap.err).toContain(why);
     expect(h.cap.err).toMatch(/stays valid until it expires/);
   });
 
@@ -45,13 +46,16 @@ describe("auth logout", () => {
 
   it("deletes a pasted key without contacting the server and says it was not revoked", async () => {
     const h = harness({ stored: [fakeLogin({ method: "pasted", scopes: [], expiresAt: null })] });
-    h.knobs.discoverError = new AuthError("network", "should not be called");
+    // Discovery works, so a logout that tried to revoke would get as far as the server.
+    let discovered = 0;
+    const discover = h.deps.discover;
+    h.deps.discover = async (...args) => (discovered++, discover(...args));
     expect(await logoutCommand({}, h.deps)).toBe(0);
+    expect(discovered).toBe(0);
     expect(h.server.revoked).toEqual([]);
     expect(await h.store.get(HOST)).toBeNull();
     expect(h.cap.err).toContain("not revoked");
     expect(h.cap.err).toContain("user preferences");
-    expect(h.cap.err).not.toContain("should not be called");
   });
 
   it("reports an unreadable store as an unexpected error, exit 70", async () => {
@@ -116,7 +120,8 @@ describe("logout with the Galaxy down, over the real store", () => {
     expect(await logoutCommand({}, h.deps)).toBe(0);
     expect(keyring.data.size).toBe(0);
     expect(await file.list()).toEqual([]);
-    expect(h.cap.err).toContain("Could not revoke the token on the server (connection refused)");
+    expect(h.cap.err).toContain("Could not revoke the token on the server");
+    expect(h.cap.err).toContain("connection refused");
   });
 
   it("deletes a file-stored token too, leaving no copy in hosts.yml", async () => {
