@@ -6,6 +6,10 @@
  * They do not guess how long the sockets need: the client's `fetch` is wrapped to know when
  * a request has been answered in full, and after each step of the fake clock `tick` waits for
  * exactly that. What remains after it is in-process work with no I/O left to wait for.
+ *
+ * `setImmediate` is left real: `until` needs real event-loop turns to see the sockets finish.
+ * The client's own deadline is a plain `setTimeout`, not `AbortSignal.timeout`, so that these
+ * fake timers can move it (oauth.ts).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { discover } from "../../src/auth/oauth";
@@ -86,6 +90,7 @@ describe("polling", () => {
     await expect(done).resolves.toMatchObject({ scopes: ["read"] });
   });
 
+  // RFC 8628 §3.2: `interval` is the least the client waits between polls to the token endpoint.
   it("waits the server's interval before the first poll and between polls", async () => {
     galaxy = await start({ interval: 2 });
     const { server, net } = await connect();
@@ -116,7 +121,9 @@ describe("polling", () => {
 
     await w.tick(1000 + JUST_AFTER); // first poll: slow_down
     expect(tokenRequests()).toBe(1);
-    await w.tick(6000 - 2 * JUST_AFTER); // the interval is now 6 s: not yet
+    // The interval is now 6 s: not yet. It stays 6 s from here on (the last wait is 6 s too), because
+    // slow_down sets a new interval rather than delaying one poll.
+    await w.tick(6000 - 2 * JUST_AFTER);
     expect(tokenRequests()).toBe(1);
     await w.tick(3 * JUST_AFTER);
     expect(tokenRequests()).toBe(2);
@@ -127,6 +134,8 @@ describe("polling", () => {
   });
 });
 
+// Giving openid-client a signal replaces its own `expires_in` deadline (oauth.ts), so the deadline
+// is the client's, and these show that it still ends the wait.
 describe("the local deadline", () => {
   it("rejects with expired when the code's lifetime passes, even if the server never says so", async () => {
     // The server stays pending: its clock is the real one, which this test never moves.
@@ -153,6 +162,9 @@ describe("the local deadline", () => {
   });
 });
 
+// A login waits as long as the code lives, so one dropped connection or 5xx must not end it. What
+// does end it at once is a failure that retrying cannot fix: an OAuth error that is not
+// `authorization_pending` or `slow_down`, a 4xx other than 429, or a certificate error.
 describe("transient failures", () => {
   beforeEach(async () => {
     galaxy = await start({ interval: 0.01 });
@@ -236,6 +248,9 @@ describe("transient failures", () => {
   });
 });
 
+// A cancel must stop the polling at once and leave nothing on the server. The poll loop is the
+// client's own because openid-client's waits ignore the signal for up to 5 s and its timers keep
+// the process alive after a Ctrl-C (oauth.ts).
 describe("cancelling", () => {
   beforeEach(async () => {
     galaxy = await start();

@@ -1,3 +1,8 @@
+/**
+ * `status` in process: every stored login is read back and checked live against its Galaxy, one
+ * host at a time, and printed to stderr. stdout is only for what a script asked for (`--json`,
+ * `--show-token`).
+ */
 import { describe, it, expect } from "vitest";
 import { statusCommand } from "../../src/auth/commands/status";
 import { createWhoami } from "../../src/auth/whoami";
@@ -24,6 +29,8 @@ describe("auth status", () => {
     expect(h.whoamiCalls).toHaveLength(1);
   });
 
+  // `--show-token` is the one way `status` prints a token, and it goes to stdout, where a script
+  // reads data, like `auth token`. stderr always carries the masked form, so it stays safe to log.
   it("puts the unmasked token on stdout, never stderr, with --show-token", async () => {
     const h = harness({ stored: [fakeLogin()] });
     await statusCommand({ showToken: true }, h.deps);
@@ -50,6 +57,8 @@ describe("auth status", () => {
     expect(one.cap.err).toContain("other.example.org");
   });
 
+  // An expiry the clock already shows needs no request to find out, so none is made: `whoamiCalls`
+  // is empty, and the token goes nowhere.
   it("exits 1 and skips the live check for an expired login", async () => {
     const h = harness({ stored: [expiredLogin()] });
     expect(await statusCommand({}, h.deps)).toBe(1);
@@ -82,6 +91,7 @@ describe("auth status", () => {
     expect(h.cap.err).toContain("GALAXY_API_KEY is set and takes precedence over stored logins");
   });
 
+  // 77 is EX_NOPERM, as for the other commands that find nothing to use: not logged in.
   it("with nothing stored, says so and exits 77", async () => {
     const h = harness();
     expect(await statusCommand({}, h.deps)).toBe(77);
@@ -115,6 +125,8 @@ describe("auth status", () => {
     });
   });
 
+  // Every stored login is checked, so a Galaxy that never answers must cost that one host a timeout
+  // and a reported failure, not hang the command or hide the others.
   describe("one slow Galaxy", () => {
     it("is that host's failure, and the others are still reported", async () => {
       const h = twoLogins();
@@ -137,6 +149,8 @@ describe("auth status", () => {
     });
   });
 
+  // `--json` always exits 0 (its option says so): each login's own `status` field carries how its
+  // check went, so a failed login is data in the output, not a failed command.
   describe("--json", () => {
     it("prints an array to stdout without tokens and exits 0 even when a login failed", async () => {
       const h = harness({ stored: [expiredLogin()] });
@@ -176,6 +190,9 @@ describe("auth status", () => {
     });
   });
 
+  // The record lists the login but its token cannot be read (the keyring is down, or the secret is
+  // gone). That host is reported as unavailable and the others are still checked: one unreadable
+  // token must not hide the rest.
   describe("when a token cannot be read", () => {
     it.each(["throw", "null"] as const)("reports that host, still checks the others, and exits 1 (%s)", async (how) => {
       const h = twoLogins();
@@ -207,6 +224,8 @@ describe("auth status", () => {
     });
   });
 
+  // An expiry that cannot be parsed is treated as expired, never as no expiry: a token must not
+  // look permanent because its record is damaged.
   it("says an unreadable expiry is unreadable, rather than printing NaN, and makes no live check", async () => {
     const h = harness({ stored: [fakeLogin({ expiresAt: "tomorrow" })] });
     expect(await statusCommand({}, h.deps)).toBe(1);

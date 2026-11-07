@@ -100,6 +100,8 @@ describe("buildProgram", () => {
     expect(names.length).toBe(allOperations.length + 1);
   });
 
+  // A key on the command line is visible in shell history and process listings, so the warning points
+  // at the login instead and must not repeat the key it is warning about.
   it("warns that --api-key is deprecated, pointing at `auth login`", async () => {
     const run = await runCli(["--api-key", "fake-flag-key", "get_histories"], ctxFactory);
     expect(run.stderr).toContain("--api-key is deprecated");
@@ -109,6 +111,8 @@ describe("buildProgram", () => {
 
   it("exits 70 when an operation fails with a bug, and prints neither the key nor a response", async () => {
     // A context without a client: the operation throws a TypeError, which is not a Galaxy error.
+    // That is a bug in the CLI, so it exits 70 (EX_SOFTWARE) and prints the stack. Neither the stack
+    // nor stdout may carry the key or a response.
     const secret = "fake-key-must-not-appear";
     const run = await runCli(["get_histories"], () => ({ baseUrl: "https://g.example", apiKey: secret }) as unknown as ReturnType<typeof createGalaxyContext>);
     expect(run.exitCode).toBe(70);
@@ -351,6 +355,11 @@ describe("buildProgram", () => {
   });
 });
 
+/**
+ * The name `auth` prints in its hints is the one the program was run as, so a `galaxy-cli` user is
+ * never told to run `gxy`. The extension is dropped so the Windows shim (`gxy.cmd`) still counts as
+ * `gxy`, and `node dist/index.js` is `galaxy-cli`.
+ */
 describe("programName", () => {
   it("is gxy only when invoked as gxy", () => {
     expect(programName("/usr/local/bin/gxy")).toBe("gxy");

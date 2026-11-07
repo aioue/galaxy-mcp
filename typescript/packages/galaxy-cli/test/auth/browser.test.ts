@@ -6,6 +6,11 @@ import { join } from "node:path";
 import { SPAWN_TIMEOUT_MS, canOpenBrowser, openBrowser } from "../../src/auth/browser";
 import { useTempDir } from "./harness";
 
+/**
+ * A `spawn` that runs nothing. It records every call (command, arguments, options) and then starts
+ * the "child" (`spawn`), fails it (`error`, as for a missing program) or throws, so the opener's
+ * choices and fallbacks can be read back without launching anything.
+ */
 function fakeSpawn(outcome: "spawn" | "error" | "throw") {
   const calls: { cmd: string; args: string[]; opts: unknown }[] = [];
   const impl = ((cmd: string, args: string[], opts: unknown) => {
@@ -48,6 +53,7 @@ describe("openBrowser", () => {
     expect(w.calls[0]).toMatchObject({ cmd: "rundll32", args: ["url.dll,FileProtocolHandler", URL_] });
   });
 
+  // The URL is text from the server, and an opener asked for `file://` or `javascript:` would act on it.
   it("refuses a non-http URL", async () => {
     const s = fakeSpawn("spawn");
     expect(await openBrowser("file:///etc/passwd", { DISPLAY: ":0" }, "linux", s.impl)).toBe(false);
@@ -113,11 +119,17 @@ describe("$BROWSER", () => {
 
 // The fake `spawn` tests above prove what is handed to `spawn`. These run a real launcher, so they
 // prove what the operating system hands it: the URL arrives as one argv entry, and no shell
-// ever sees it.
+// ever sees it. The distinction matters because a fake sees the URL whole, and with a shell in the
+// path it would be split into words only afterwards. And the URL is the server's text (login checks
+// its origin, not its path or query), so it can hold anything a shell would act on.
 describe.skipIf(process.platform === "win32")("a real $BROWSER launcher", () => {
   const tmp = useTempDir("gxy-browser-");
 
-  /** A launcher that writes its argument count, then its arguments one per line, to `argv.txt`. */
+  /**
+   * A launcher that writes its argument count, then its arguments one per line, to `argv.txt`. The
+   * count is what shows a split: one URL is `1`, however many spaces it holds. It writes a `.part`
+   * file and renames it, so `readArgv` never reads half of it.
+   */
   async function stub(): Promise<{ path: string; argvFile: string; readArgv: () => Promise<string[]> }> {
     const path = join(tmp.path, "stub-browser");
     const argvFile = join(tmp.path, "argv.txt");

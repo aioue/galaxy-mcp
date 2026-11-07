@@ -1,3 +1,9 @@
+/**
+ * The fakes for running an `auth` command in process. A command is a function over `AuthDeps`, so
+ * a test hands it in-memory stand-ins for the store, the server, the clock and the terminal, steers
+ * each one, and reads back what the command did to it. What only a real process, pipe or socket can
+ * show belongs in `e2e.int.test.ts` and `test/support/fake-galaxy.ts`, not here.
+ */
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,12 +29,14 @@ import {
   type WhoAmI,
 } from "../../src/auth/types";
 
+/** The clock every harness runs on, so "expires in 7h" does not depend on when the suite runs. */
 export const DAY = "2026-11-06T10:44:00.000Z";
 export const HOST: BaseUrl = normalizeBaseUrl("https://dev.galaxy.example.org");
 export const OTHER: BaseUrl = normalizeBaseUrl("https://other.example.org");
 /** Obviously fake. */
 export const FAKE_TOKEN = "fake-token-0123456789abcdef";
 
+/** A stored device login for `HOST` that expires about eight hours after `DAY`; `over` replaces any field. */
 export function fakeLogin(over: Partial<StoredLogin> = {}): StoredLogin {
   return {
     baseUrl: HOST,
@@ -45,6 +53,13 @@ export function fakeLogin(over: Partial<StoredLogin> = {}): StoredLogin {
 /** What `FakeStore` says when it refuses an admin token for lack of a keyring (the real wording is store.ts's). */
 export const REFUSED_WITHOUT_KEYRING = "keyring unavailable, nothing stored";
 
+/**
+ * A credential store in memory. It answers from `logins` and records every `put` with the options
+ * it was given, because what login asks of the store (`requireKeyring` for an admin's token,
+ * `insecureStorage` when the person said so) is behaviour in its own right. What the real store
+ * answers to those options is tested in store.test.ts, not copied here. Like the real one, `list`
+ * leaves the token out.
+ */
 export class FakeStore implements CredentialStore {
   logins = new Map<string, StoredLogin & { storage: StorageKind }>();
   putCalls: { login: StoredLogin; opts?: { insecureStorage?: boolean; requireKeyring?: boolean } }[] = [];
@@ -131,12 +146,20 @@ export function useTempDir(prefix = "gxy-test-"): { readonly path: string } {
   };
 }
 
-/** The real `CombinedStore` over a real `hosts.yml` under `root` and the given fake keyring. */
+/**
+ * The real `CombinedStore` over a real `hosts.yml` under `root` and the given fake keyring. The
+ * keyring timeout is 50 ms rather than the real 5 s, so a `hang` keyring is noticed at once.
+ */
 export function realStore(root: string, keyring: FakeKeyring, keyringTimeoutMs = 50): { store: CombinedStore; file: FileStore } {
   const file = new FileStore(join(root, "cfg"));
   return { file, store: new CombinedStore(file, new KeyringStore(keyring, keyringTimeoutMs)) };
 }
 
+/**
+ * A device login waiting for approval. `outcome` is what `waitForApproval` ends with: a grant, an
+ * `AuthError` it throws, or `"hang"`, which stays pending until the caller's signal aborts, as the
+ * real wait does on Ctrl-C. The user code is the example RFC 8628 §3.2 gives.
+ */
 export class FakePending implements PendingDeviceLogin {
   userCode = "WDJB-MJHT";
   verificationUri = "https://dev.galaxy.example.org/login/device";
@@ -157,6 +180,13 @@ export class FakePending implements PendingDeviceLogin {
   }
 }
 
+/**
+ * An `AuthServer` that records instead of speaking OAuth. `startedWith` holds the scopes each
+ * device login asked for (`undefined` when it sent none, which is not the same as `[]`), and
+ * `revoked` the tokens it was asked to revoke, so a test can show a token was taken back or was
+ * left alone. `revokeError` makes a revoke fail. The real protocol is tested against the fake
+ * Galaxy in oauth.test.ts.
+ */
 export class FakeServer implements AuthServer {
   issuer: string;
   supportsDeviceFlow = true;
@@ -179,6 +209,13 @@ export class FakeServer implements AuthServer {
   }
 }
 
+/**
+ * What a command wrote, kept as two strings. Commands write through `deps.io` and never to
+ * `console`, so nothing needs spying on and each run's output is its own. stdout and stderr stay
+ * apart because that split is the contract: stdout is what a script consumes (a token, `env`
+ * exports, headers, `--json`) and stderr is everything a person reads, so most tests assert that
+ * one of them is empty.
+ */
 export class Capture {
   out = "";
   err = "";
@@ -192,13 +229,22 @@ export interface Harness {
   server: FakeServer;
   cap: Capture;
   stdin: PassThrough;
+  /** The URLs the command asked the browser opener to open. */
   opened: string[];
+  /** Each live check, with the token it was made with, so a test can show one was skipped. */
   whoamiCalls: { baseUrl: string; token: string }[];
-  /** Mutable knobs. */
+  /**
+   * What a test flips after building: the live check's answer (or its `AuthError`), whether a
+   * browser can open, and discovery failing.
+   */
   knobs: { whoami: WhoAmI | AuthError; browserAvailable: boolean; discoverError?: AuthError };
 }
 
-/** A set of in-memory fakes behind `AuthDeps`. `stdinText` is written and ended at once. */
+/**
+ * A fresh set of in-memory fakes behind `AuthDeps`. `stdinText` is written and ended at once;
+ * without it stdin stays open and empty, which is how a command that is waiting on input gets
+ * tested, and cancelled. The clock is fixed at `DAY`.
+ */
 export function harness(
   opts: { interactive?: boolean; env?: Record<string, string>; stdinText?: string; stored?: StoredLogin[]; hostFromEnv?: string; ignoredLoginHost?: { source: "dotenv" | "profile"; url: string } } = {},
 ): Harness {
@@ -226,7 +272,9 @@ export function harness(
       if (knobs.whoami instanceof AuthError) throw knobs.whoami;
       return knobs.whoami;
     },
-    // The real rule, over the fake store; `.env` and profiles are not in play here.
+    // The real rule, over the fake store, so a host is picked here as operations pick it (host.ts).
+    // `.env` and profiles are not in play: `ignoredLoginHost` is a canned answer, and the real
+    // read of a working directory's `.env` is shown by e2e.int.test.ts.
     resolveHost: (explicit, purpose) => resolveHost({ explicit, env, dotenv: {}, store, forLogin: purpose === "login", commandName: "gxy" }),
     ignoredLoginHost: () => opts.ignoredLoginHost,
     async openBrowser(url) {
@@ -243,8 +291,9 @@ export function harness(
 }
 
 /**
- * Make `get` fail for the given hosts, as a keyring that is down (`throw`) or has lost the secret
- * (`null`) does, while the record is still listed.
+ * Make `get` fail for the given hosts while the record is still listed. `throw` is how the real
+ * store reports a keyring that is down or has lost the secret. `null` is the other answer the
+ * `CredentialStore` interface allows, and the commands must cope with that one too.
  */
 export function makeTokenUnreadable(h: Harness, hosts: string[], how: "throw" | "null" = "throw"): void {
   const get = h.store.get.bind(h.store);

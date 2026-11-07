@@ -1,3 +1,8 @@
+/**
+ * Which Galaxy is meant. `pickHost` is the one precedence rule, used by `gxy auth *` and by
+ * operations alike, and `resolveHost` is its form for `auth`: it reads the stored logins only when
+ * nothing else names a host, and normalises the result.
+ */
 import { describe, expect, it } from "vitest";
 import { normalizeBaseUrl } from "../../src/auth/base-url";
 import { pickHost, resolveHost } from "../../src/auth/host";
@@ -47,6 +52,8 @@ describe("pickHost: one precedence", () => {
     expect(() => pickHost(empty)).toThrow(expect.objectContaining({ kind: "usage" }));
   });
 
+  // `login` sends a key, or asks for approval, to the host it picks, so it never takes one from files
+  // in the working or home directory: a repository must not be able to choose where your credentials go.
   it("for login, ignores .env and the profile but still takes the flag and the environment", () => {
     const l = { ...all, flag: undefined, env: {}, forLogin: true };
     expect(pickHost(l).source).toBe("stored");
@@ -83,6 +90,7 @@ describe("resolveHost (gxy auth *)", () => {
     expect(await resolveHost({ ...input, env: { GALAXY_URL: "https://env.example" }, store: storeOf() })).toBe("https://env.example");
   });
 
+  // Listing the stored logins reads `hosts.yml`, so it happens only when nothing else names the host.
   it("does not list the store when something names the host", async () => {
     const store = storeOf("https://s.example");
     store.list = async () => {
@@ -92,6 +100,10 @@ describe("resolveHost (gxy auth *)", () => {
   });
 });
 
+// Each case feeds the same inputs to the operations' own resolver (`loadSourcesAsync` and
+// `resolveConnection`, config.ts) and to `auth`'s `resolveHost`, and compares what they pick. The
+// expectation is the other code path's answer, not a restatement of the precedence, so the two cannot
+// drift apart without this failing.
 describe("operations and auth pick the same Galaxy", () => {
   const cases: Record<string, { flags: { url?: string; profile?: string }; env?: Record<string, string>; dotenv?: Record<string, string> }> = {
     flag: { flags: { url: B } },
