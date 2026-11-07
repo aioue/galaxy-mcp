@@ -46,7 +46,7 @@ importers:
         specifier: ^6.0.0
         version: 6.0.3
       vitest:
-        specifier: 5.1.0
+        specifier: ^5.1.0
         version: 5.1.0(@types/node@24.19.2)(vite@8.1.6(@types/node@24.19.2)(esbuild@0.27.7)(tsx@4.23.15)(yaml@2.9.0))
 
   packages/galaxy-mcp:
@@ -74,7 +74,7 @@ importers:
         specifier: ^6.0.0
         version: 6.0.3
       vitest:
-        specifier: 5.1.0
+        specifier: ^5.1.0
         version: 5.1.0(@types/node@24.19.2)(vite@8.1.6(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15)(yaml@2.9.0))
 
   packages/galaxy-ops:
@@ -105,7 +105,7 @@ importers:
         specifier: ^6.0.0
         version: 6.0.3
       vitest:
-        specifier: 5.1.0
+        specifier: ^5.1.0
         version: 5.1.0(@types/node@24.19.2)(vite@8.1.6(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15)(yaml@2.9.0))
 
 packages:

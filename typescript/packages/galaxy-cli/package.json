@@ -34,7 +34,7 @@
     "@types/node": "^24.19.2",
     "execa": "^9.5.0",
     "tsup": "^8.3.0",
-    "vitest": "5.1.0",
+    "vitest": "^5.1.0",
     "typescript": "^6.0.0"
   }
 }
