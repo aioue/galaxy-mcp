@@ -13,10 +13,16 @@ import { AuthError } from "../../src/auth/types";
 import { FAKE_TOKEN, HOST, fakeLogin, harness } from "./harness";
 
 const HOST_ARG = "https://dev.galaxy.example.org";
+/** The harness's fakes for one run: `cap.out` and `cap.err` hold everything written to each stream. */
 type H = ReturnType<typeof harness>;
+/** One command invocation against a harness, resolving to its exit code. */
 type Run = (h: H) => Promise<number>;
 
+// `FAKE_TOKEN` is a canary: a string no other output could contain by accident, so finding it in a
+// stream means the token went there. Each command is run once and both streams are searched.
 describe("a stored, valid login", () => {
+  // `handsOutToken` is written by hand for each command and checked both ways below: a command that
+  // should print the token and does not fails as surely as one that prints it and should not.
   const cases: [name: string, handsOutToken: boolean, run: Run][] = [
     ["token", true, (h) => tokenCommand({}, h.deps)],
     ["token --json", true, (h) => tokenCommand({ json: true }, h.deps)],
@@ -40,13 +46,20 @@ describe("a stored, valid login", () => {
   });
 });
 
+// The error paths are where a message is most likely to quote the token, so every command is also
+// run into each way it can fail, and neither stream may carry it.
 describe("when there is no usable login or the server fails", () => {
+  // The login expires before the harness's fixed clock, so it is expired without waiting.
   const expiredLogin = () => harness({ stored: [fakeLogin({ expiresAt: "2026-11-06T09:00:00.000Z" })] });
+  // With nothing stored there is no host to resolve, so the command is given one; it then reaches
+  // its "no login" error and not the host-selection one.
   const noLogin = () => {
     const h = harness();
     h.deps.resolveHost = async () => HOST;
     return h;
   };
+  // Every server call fails, whichever one the command makes: Galaxy rejects the key, discovery
+  // cannot reach it, and the revoke errors.
   const serverDown = () => {
     const h = harness({ stored: [fakeLogin()] });
     h.knobs.whoami = new AuthError("not_logged_in", "Galaxy rejected the key");
@@ -85,6 +98,10 @@ describe("when there is no usable login or the server fails", () => {
   });
 });
 
+// `login` never hands out a token, so its stdout must be empty as well as free of it. The four runs
+// are its four outcomes: the device flow succeeding, a pasted key succeeding, a pasted key Galaxy
+// refuses, and an admin key with no keyring to hold it (which `requireKeyring` will not put in a
+// file).
 describe("login", () => {
   it("never prints the token, whether it succeeds, is refused, or cannot store", async () => {
     const device = harness();

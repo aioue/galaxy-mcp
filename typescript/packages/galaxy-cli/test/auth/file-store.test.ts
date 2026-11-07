@@ -4,9 +4,14 @@ import { describe, expect, it } from "vitest";
 import { FileStore, type HostRecord } from "../../src/auth/file-store";
 import { HOST, OTHER, fakeLogin, useTempDir } from "./harness";
 
+// These run the real `FileStore` on a real directory. What it guards (modes, links, owners, the
+// rename into place) belongs to the file system, so an in-memory stand-in could only agree with
+// the code rather than check it.
 const tmp = useTempDir("gxy-fs-");
+/** A config directory that does not exist yet, so a first write has to create it, and set its mode. */
 const dirOf = () => join(tmp.path, "cfg");
 
+/** A file-stored record built from `fakeLogin`, so its token is in the file; `over` changes fields. */
 function rec(over: Partial<HostRecord> = {}): HostRecord {
   const { token, ...rest } = fakeLogin();
   return { ...rest, storage: "file", token, ...over };
@@ -43,6 +48,7 @@ describe("reading and writing", () => {
 
   it("deletes, and lists sorted by URL", async () => {
     const s = new FileStore(dirOf());
+    // OTHER goes in first and sorts last, so the order read back is not the order written.
     await s.put(rec({ baseUrl: OTHER }));
     await s.put(rec());
     expect((await s.list()).map((r) => r.baseUrl)).toEqual([HOST, OTHER]);
@@ -56,12 +62,16 @@ describe("permissions", () => {
   it("creates a 0700 directory and a 0600 file, and leaves no temp file", async () => {
     const s = new FileStore(dirOf());
     await s.put(rec());
+    // The second put replaces a file that exists, which is where a temp file surviving the
+    // rename would show.
     await s.put(rec({ username: "bob" }));
     expect(await mode(s.dir)).toBe(0o700);
     expect(await mode(s.path)).toBe(0o600);
     expect(await readdir(s.dir)).toEqual(["hosts.yml"]);
   });
 
+  // A umask of 000 strips nothing, so a directory made without an explicit 0700 would come out
+  // 0777 here. Any wider umask would hide the difference.
   it("still creates the directory 0700 under a umask of 000", async () => {
     const s = new FileStore(dirOf());
     const old = process.umask(0o000);
@@ -73,9 +83,10 @@ describe("permissions", () => {
     expect(await mode(s.dir)).toBe(0o700);
   });
 
-  // Under 0277 a new file would be 0400, so only the explicit chmod brings it to 0600 (under 000
-  // the creation mode alone would already be right). The directory exists first: 0277 would
-  // otherwise make it unwritable.
+  // Only a umask that strips bits from 0600 can show a missing `fchmod`: under 000 or 022 the
+  // creation mode alone already gives 0600. Under 0277 the new file would be 0400 without it.
+  // The directory is made first because 0277 would leave one the store creates 0500, and the temp
+  // file could not then be written.
   it("still writes the file 0600 under a restrictive umask", async () => {
     const s = new FileStore(dirOf());
     await mkdir(s.dir, { mode: 0o700 });
@@ -88,6 +99,9 @@ describe("permissions", () => {
     expect(await mode(s.path)).toBe(0o600);
   });
 
+  // A looser mode is repaired with a warning, where a symlink or another owner (below) is refused:
+  // the file is still ours, only its mode is wrong. The file is fixed on read and the directory on
+  // write, which is where each is next used. `warnings` records what would go to stderr.
   it("repairs a looser file on read and a looser directory on write, warning each time", async () => {
     const warnings: string[] = [];
     const s = new FileStore(dirOf(), undefined, (m) => warnings.push(m));
@@ -102,6 +116,8 @@ describe("permissions", () => {
     expect(warnings.some((w) => /accessible to others.*700/.test(w))).toBe(true);
   });
 
+  // An unparseable file can still hold a token, so its mode is narrowed before the parse is
+  // attempted and stays narrow when the parse fails.
   it("repairs a loose file mode before parsing, even when the content then fails to parse", async () => {
     await mkdir(dirOf(), { mode: 0o700 });
     const warnings: string[] = [];
@@ -115,6 +131,9 @@ describe("permissions", () => {
 });
 
 describe("refusing what is not a plain file or directory of ours", () => {
+  // The target sits outside the config directory and must come out unchanged: a put that followed
+  // the link would have written the token to wherever it points. The directory listing then
+  // shows that no temp file was left behind either.
   it("refuses a hosts.yml that is a symlink, reading or writing, and does not touch the target", async () => {
     const s = new FileStore(dirOf());
     await mkdir(s.dir, { mode: 0o700 });
@@ -127,6 +146,7 @@ describe("refusing what is not a plain file or directory of ours", () => {
     expect(await readdir(s.dir)).toEqual(["hosts.yml"]);
   });
 
+  // `real` must stay empty: a write through the linked directory would land a token in it.
   it("refuses a config directory that is a symlink", async () => {
     const real = join(tmp.path, "real");
     await mkdir(real, { mode: 0o700 });
@@ -139,7 +159,8 @@ describe("refusing what is not a plain file or directory of ours", () => {
   });
 
   it("refuses a directory or file owned by someone else", async () => {
-    // chown needs root, so the owner the store expects is the thing that differs.
+    // Changing a file's owner needs root, so the test changes the uid the store expects instead:
+    // the files are ours, and the store is told that someone else should own them.
     const mine = process.getuid!();
     const s = new FileStore(dirOf(), undefined, undefined, mine + 1);
     await mkdir(s.dir, { mode: 0o700 });
@@ -156,6 +177,8 @@ describe("refusing what is not a plain file or directory of ours", () => {
     await expect(s.list()).rejects.toThrow(/not a regular file/);
   });
 
+  // `process.getuid` does not exist on Windows, so the store takes `undefined` there and cannot
+  // compare owners. The check is skipped, not failed, or no login could be stored at all.
   it("skips the ownership check when there is no uid to compare (Windows)", async () => {
     const s = new FileStore(dirOf(), undefined, undefined, undefined);
     await s.put(rec());
@@ -164,8 +187,9 @@ describe("refusing what is not a plain file or directory of ours", () => {
 });
 
 describe("a corrupt hosts.yml", () => {
-  // Each of these holds the token in a field the parser may quote, so an error that repeated
-  // the file's text would repeat the token.
+  // Every variant below puts a canary token in a field the YAML parser might quote back in its
+  // error, so a message that repeated the file's text would repeat the token. Each test therefore
+  // asserts what the message names (the file) and, separately, that the canary is absent.
   const SECRET = "FAKE-SECRET-TOKEN-123";
   const entry = (over: Record<string, string> = {}) => {
     const fields: Record<string, string> = {
@@ -181,6 +205,7 @@ describe("a corrupt hosts.yml", () => {
     return `hosts:\n  ${HOST}:\n${Object.entries(fields).map(([k, v]) => `    ${k}: ${v}\n`).join("")}`;
   };
 
+  /** Writes `text` as the hosts file; returns the store and the message of the error `list` raises. */
   async function readError(text: string): Promise<{ s: FileStore; message: string }> {
     await mkdir(dirOf(), { recursive: true });
     const s = new FileStore(dirOf());
@@ -189,6 +214,7 @@ describe("a corrupt hosts.yml", () => {
       () => undefined,
       (x: unknown) => x as Error,
     );
+    // A file that was accepted fails here, so a case cannot pass by not being corrupt after all.
     if (!e) throw new Error("expected the corrupt file to be refused");
     return { s, message: e.message };
   }
@@ -220,6 +246,8 @@ describe("a corrupt hosts.yml", () => {
     expect(message).not.toContain(SECRET);
   });
 
+  // A put that treated an unreadable file as empty would replace every other host's login with
+  // one entry. The message says "it has not been modified", so the bytes are compared.
   it("does not overwrite it on a put, and a put names it too", async () => {
     const text = "hosts: [unclosed\n  : :";
     const { s } = await readError(text);
@@ -236,6 +264,10 @@ describe("a corrupt hosts.yml", () => {
 });
 
 describe("stale temp files", () => {
+  // A write killed before its rename leaves a temp file that may hold a token. Age is the only
+  // thing that tells a leftover from a write still running in another process, so the fresh one
+  // stays; `notes.tmp` is old but not ours, so it stays too. The ages are set with `utimes`
+  // relative to now, not by waiting.
   it("removes .hosts.*.tmp files older than an hour on a write, and only those", async () => {
     await mkdir(dirOf(), { mode: 0o700 });
     const old = join(dirOf(), ".hosts.123.abc.tmp");

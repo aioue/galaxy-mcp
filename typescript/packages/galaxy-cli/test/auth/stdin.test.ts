@@ -3,10 +3,16 @@ import { describe, expect, it } from "vitest";
 import { InputCancelled, MAX_KEY_BYTES, readPiped, readSecret, type RawStdin } from "../../src/auth/stdin";
 import { AuthError } from "../../src/auth/types";
 
+// Input that cannot be an API key, which is printable ASCII with no whitespace: a space, a curly
+// quote and a non-ASCII letter, the marks of a broken paste. Both readers refuse them as a usage
+// error, and the message must not repeat the input, or a pasted secret would reach the screen and
+// any log of the terminal.
 const NOT_KEYS = [["a space", "fake key"], ["a curly quote", "fake‘key"], ["a non-ASCII letter", "fakékey"]];
 
 describe("readPiped", () => {
+  /** A signal that never aborts, for the tests that are not about cancelling. */
   const signal = () => new AbortController().signal;
+  /** A stream already given `text` and ended, as if the caller's `echo key |` had finished. */
   const piped = (text: string) => {
     const s = new PassThrough();
     s.end(text);
@@ -24,12 +30,17 @@ describe("readPiped", () => {
     expect((e as AuthError).message).not.toContain(bad);
   });
 
+  // `k` is one byte, so the length is the byte count. Nothing near the cap can be a key (see
+  // `MAX_KEY_BYTES`), so a file piped in by mistake is refused with a message that says so. The
+  // pair of cases pins the boundary itself.
   it("accepts input right at the size cap and refuses one byte more", async () => {
     await expect(readPiped(piped("k".repeat(MAX_KEY_BYTES)), signal())).resolves.toHaveLength(MAX_KEY_BYTES);
     const e = await readPiped(piped("k".repeat(MAX_KEY_BYTES + 1)), signal()).catch((x: unknown) => x);
     expect((e as AuthError).kind).toBe("usage");
   });
 
+  // The stream is never ended, so only the abort can finish the read. A `data` listener left on
+  // stdin would keep it flowing, and the process alive, after a login that was cancelled.
   it("stops reading, leaving no listener behind, when the signal aborts", async () => {
     const s = new PassThrough();
     const ac = new AbortController();
@@ -41,11 +52,18 @@ describe("readPiped", () => {
 });
 
 describe("readSecret", () => {
+  /**
+   * A fake terminal: a stream the test writes keystrokes to, with a `setRawMode` that records each
+   * value it is called with in `raw`. A real terminal in raw mode has no echo and no line editing, so
+   * a test can tell from `raw` that the terminal went raw (`true` first) and was put back (`false`
+   * last) on every way out.
+   */
   function terminal() {
     const raw: boolean[] = [];
     const s = Object.assign(new PassThrough(), { setRawMode: (m: boolean) => void raw.push(m) });
     return { s, raw, stdin: s as unknown as RawStdin };
   }
+  /** A signal that never aborts, for the tests that are not about cancelling. */
   const signal = () => new AbortController().signal;
 
   it("reads a line without echo and puts the terminal back", async () => {
@@ -64,6 +82,8 @@ describe("readSecret", () => {
     await expect(p).resolves.toBe("fake-key");
   });
 
+  // A terminal wraps a paste in `ESC [200~` and `ESC [201~`. The two backspaces (0x7f) remove
+  // `XX`, so the expected `abc` is worked out by hand from the keystrokes.
   it("honours backspace and ignores the escape sequences of a bracketed paste", async () => {
     const { s, stdin } = terminal();
     const p = readSecret(stdin, signal());

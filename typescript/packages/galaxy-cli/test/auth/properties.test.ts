@@ -9,6 +9,9 @@ import { quoteFor } from "../../src/auth/commands/env";
 import { sanitize } from "../../src/auth/sanitize";
 import { AuthError } from "../../src/auth/types";
 
+// The seed is fixed, so a failure on one machine is a failure on every machine and can be replayed
+// from the seed in the report. Two hundred runs is enough to cover the generators below in well
+// under a second; the shell test is lower still because it starts a process per run.
 const params = { seed: 20260707, numRuns: 200 };
 
 // Small generators: a mix of well-formed URLs and the awkward pieces that matter to the key.
@@ -22,6 +25,7 @@ const urlish = fc.oneof(
   fc.string({ maxLength: 30 }),
 );
 
+/** The key for `input`, or undefined when it was refused as a bad URL. Any other error propagates. */
 const attempt = (input: string) => {
   try {
     return normalizeBaseUrl(input);
@@ -48,6 +52,10 @@ describe("normalizeBaseUrl properties", () => {
     );
   });
 
+  // The key is a credential key, and a stored key is normalised again on lookup, so it must come
+  // back unchanged. A doubled `/api` broke this: it normalised to `/api` and then, on the second
+  // pass, to the bare host. A longer run of this property found that, and it is now pinned with
+  // examples in units.test.ts.
   it("is idempotent: a stored key normalises to itself", () => {
     fc.assert(
       fc.property(urlish, (input) => {
@@ -60,7 +68,9 @@ describe("normalizeBaseUrl properties", () => {
 });
 
 describe("quoteFor", () => {
-  // Spawns a real sh per run, so the run count stays low.
+  // The expectation is the input itself, printed back by a real `sh`: a re-implementation of shell
+  // quoting in the test would agree with the code by construction. Printable ASCII is the domain
+  // because that is all a token may contain. It spawns a real sh per run, so the run count is lower.
   it.skipIf(process.platform === "win32")("sh quoting round-trips any printable ASCII through a real sh", () => {
     const printable = fc.string({ unit: fc.integer({ min: 0x20, max: 0x7e }).map((c) => String.fromCharCode(c)), maxLength: 40 });
     fc.assert(
@@ -74,7 +84,10 @@ describe("quoteFor", () => {
 });
 
 describe("sanitize", () => {
-  // Code points up to U+20FF cover C0, C1 and the common Cf ranges; the extras are Cf characters beyond them.
+  // The expected property uses the Unicode general categories (`\p{Cc}`, `\p{Cf}`), which are not
+  // how `sanitize` is written: it lists ranges by hand, so a character it forgot would show as a
+  // counterexample. Code points up to U+20FF cover C0, C1 and the common Cf ranges; the extras are
+  // Cf characters beyond them.
   const unit = fc.oneof(fc.integer({ min: 0, max: 0x20ff }).map((c) => String.fromCodePoint(c)), fc.constantFrom("\ufeff", "\u{e0041}", "\u{1d173}"));
 
   it("leaves no control or format characters, and is idempotent", () => {

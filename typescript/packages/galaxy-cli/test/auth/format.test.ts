@@ -8,9 +8,13 @@ import { checkExpiry, describeExpiry, formatExpiry } from "../../src/auth/expiry
 const SEC = 1000;
 const MIN = 60 * SEC;
 const HOUR = 60 * MIN;
+// A duration, unlike the harness's `DAY`, which is a timestamp.
 const DAY_MS = 24 * HOUR;
 
 describe("formatTimeLeft", () => {
+  // Each row sits on one side of a boundary, and the text is written out by hand and not computed,
+  // so a shifted boundary (a minute that rounds up, a day that keeps its minutes) moves one row.
+  // Negative and zero both read "under a minute", since the caller never wants a negative time.
   const rows: [what: string, ms: number, text: string][] = [
     ["nothing left", 0, "under a minute"],
     ["59 s", 59 * SEC, "under a minute"],
@@ -94,6 +98,8 @@ describe("describeExpiry and formatExpiry at the edges", () => {
   });
 
   // A hand-edited hosts.yml must not flood the terminal: 40 characters of the bad value, no more.
+  // The first 40 characters are `A` and any beyond are `B`, so where the value is cut shows in the
+  // quoted text without computing it from the code under test.
   const unreadable = (n: number) => "A".repeat(Math.min(n, 40)) + "B".repeat(Math.max(0, n - 40));
   const lengths: [length: number, quoted: string][] = [
     [1, "A"],
