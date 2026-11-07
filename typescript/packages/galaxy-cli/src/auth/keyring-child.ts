@@ -5,12 +5,17 @@
  * bus that accepts the connection and never answers it blocks its thread forever
  * (https://github.com/Brooooooklyn/keyring-node/issues/156). A timer in the same process
  * cannot fire, and a `worker_thread` cannot be torn down either: the process cannot exit while
- * the native thread is blocked. A child process can be SIGKILLed whatever it is doing.
+ * the native thread is blocked. A child process can be SIGKILLed whatever it is doing. gh gets
+ * by with a goroutine and a timeout, because Go can abandon a call that never returns; a
+ * blocked native thread in Node cannot be abandoned.
  *
  * Protocol: stdin is one JSON request, stdout is one JSON reply, and the process exits.
  *   request: { op: "get" | "set" | "delete", service, account, secret? }
  *   reply:   { ok: true, value?: string | null | boolean }
  *          | { ok: false, kind: "unavailable" | "not-found" | "failed", message }
+ * `unavailable` is a keyring that cannot be reached (the module will not load, or the entry
+ * cannot be built); `failed` is one that was reached and refused the call. A missing secret is
+ * `ok` with `value: null`; the parent also maps `not-found` to that, but this child never sends it.
  * The secret travels only over these pipes, never argv, env or a file, and no reply or error
  * message echoes it. Standalone on purpose: it imports nothing from the CLI, so it builds as a
  * second tsup entry and also runs as source under Node's type stripping.
@@ -30,6 +35,8 @@ type Reply =
 
 async function run(req: KeyringRequest): Promise<Reply> {
   let AsyncEntry: typeof import("@napi-rs/keyring").AsyncEntry;
+  // Imported here rather than at the top: the prebuilt binary is an optional dependency, and a
+  // platform without one has to come back as "unavailable", not as a crashed helper.
   try {
     ({ AsyncEntry } = await import("@napi-rs/keyring"));
   } catch (e) {
@@ -37,12 +44,14 @@ async function run(req: KeyringRequest): Promise<Reply> {
   }
   let entry: InstanceType<typeof AsyncEntry>;
   try {
-    // Pinned to Secret Service: see keyring-store.ts for why keyutils is never used.
+    // Pinned to Secret Service. Left alone, the binding falls back to the kernel keyutils store
+    // on any error, and a token kept there is gone at reboot; see keyring-store.ts.
     entry = new AsyncEntry(req.service, req.account, { linux: { store: "secret-service" } });
   } catch (e) {
     return { ok: false, kind: "unavailable", message: describe(e) };
   }
   try {
+    // `?? null`: a missing entry comes back as null although the binding's types say undefined.
     if (req.op === "get") return { ok: true, value: (await entry.getPassword()) ?? null };
     if (req.op === "set") {
       if (typeof req.secret !== "string") return { ok: false, kind: "failed", message: "set without a secret" };
@@ -76,4 +85,6 @@ try {
 } catch {
   reply = { ok: false, kind: "failed", message: "bad request" };
 }
+// Exit from the write callback, not straight after the write: the Node docs warn that stdout
+// writes can be asynchronous and that `process.exit()` skips whatever is still pending.
 process.stdout.write(JSON.stringify(reply), () => process.exit(0));
