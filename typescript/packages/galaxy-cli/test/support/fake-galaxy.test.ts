@@ -9,8 +9,13 @@ import { useFakeGalaxies } from "./fake-galaxy";
 
 const start = useFakeGalaxies();
 const userFor = async (baseUrl: string, key: string) => {
-  const res = await fetch(`${baseUrl}/api/users/current`, { headers: { "x-api-key": key } });
-  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  const res = await fetch(`${baseUrl}/api/users/current`, {
+    headers: { "x-api-key": key },
+  });
+  return {
+    status: res.status,
+    body: (await res.json()) as Record<string, unknown>,
+  };
 };
 
 describe("fake Galaxy", () => {
@@ -105,5 +110,42 @@ describe("fake Galaxy", () => {
     expect(await poll()).toBe("authorization_pending");
     expect(await poll()).toBe("slow_down");
     expect(galaxy.tooFastPolls()).toBe(1);
+  });
+
+  // `token_type: "Bearer"` is a promise (RFC 6750 §2.1) that the contract suite holds servers to, so
+  // the honest fake keeps it, and the defect option breaks exactly that.
+  it("accepts a token as `Authorization: Bearer` as well as `x-api-key`, unless acceptBearer is off", async () => {
+    const bearer = async (g: Awaited<ReturnType<typeof start>>, token: string) =>
+      (
+        (await (
+          await fetch(`${g.baseUrl}/api/users/current`, {
+            headers: { authorization: `Bearer ${token}` },
+          })
+        ).json()) as Record<string, unknown>
+      ).username;
+    const honest = await start();
+    expect(await bearer(honest, honest.issueToken({ username: "root" }))).toBe("root");
+    const broken = await start({ acceptBearer: false });
+    const token = broken.issueToken({ username: "root" });
+    expect(await bearer(broken, token)).toBeUndefined();
+    expect((await userFor(broken.baseUrl, token)).body).toMatchObject({
+      username: "root",
+    });
+  });
+
+  it("serves the metadata where metadataLocation says, and only there", async () => {
+    const wellKnown = "/.well-known/oauth-authorization-server";
+    const status = async (url: string) => (await fetch(url)).status;
+    const rfc = await start({ pathPrefix: "/galaxy" });
+    const rfcOrigin = new URL(rfc.baseUrl).origin;
+    expect(await status(`${rfcOrigin}${wellKnown}/galaxy`)).toBe(200);
+    expect(await status(`${rfcOrigin}/galaxy${wellKnown}`)).toBe(404);
+    const inside = await start({
+      pathPrefix: "/galaxy",
+      metadataLocation: "in-prefix",
+    });
+    const insideOrigin = new URL(inside.baseUrl).origin;
+    expect(await status(`${insideOrigin}/galaxy${wellKnown}`)).toBe(200);
+    expect(await status(`${insideOrigin}${wellKnown}/galaxy`)).toBe(404);
   });
 });

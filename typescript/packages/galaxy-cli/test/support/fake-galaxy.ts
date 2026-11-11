@@ -21,7 +21,7 @@
  *   `expired_token`, or the token
  * - RFC 7009 revocation
  * - `/api/users/current`, which knows a user only by a token this server issued and has not
- *   revoked or expired
+ *   revoked or expired, whether it is sent as `x-api-key` or as `Authorization: Bearer`
  *
  * It is a real HTTP server, not a stubbed `fetch`, for two reasons. The built binary in
  * e2e.int.test.ts is a separate process and cannot see anything mocked in this one. And the
@@ -51,6 +51,26 @@ export interface FakeGalaxyOptions {
   deviceExpiresIn?: number;
   /** Start with no `revocation_endpoint` in the metadata. */
   revocationEndpoint?: boolean;
+  /**
+   * DEFECT INJECTION, for the negative controls in test/auth/contract (they prove the contract checks
+   * catch a server that gets this wrong; no test of our client should use it). Where the metadata
+   * is served under a `pathPrefix`: `rfc8414` (default, and what RFC 8414 §3 requires) is
+   * `/.well-known/oauth-authorization-server/galaxy`; `in-prefix` is
+   * `/galaxy/.well-known/oauth-authorization-server` only, with a 404 at the RFC location.
+   */
+  metadataLocation?: "rfc8414" | "in-prefix";
+  /**
+   * The `token_type` of a token response. Default `Bearer`. `null` leaves it out, which RFC 6749
+   * §5.1 forbids (defect injection, as above).
+   */
+  tokenType?: string | null;
+  /**
+   * Whether a token is accepted as `Authorization: Bearer <token>`, as RFC 6750 requires of a server
+   * that says `token_type: "Bearer"`. Default true. False is defect injection, as above: a server
+   * that says Bearer but takes the token only as `x-api-key`. A token is accepted as `x-api-key`
+   * whatever this says.
+   */
+  acceptBearer?: boolean;
   /** The one `client_id` the server knows. Default `galaxy-cli`; any other is `invalid_client`. */
   clientId?: string;
   /**
@@ -215,11 +235,25 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
   const deviceExpiresIn = options.deviceExpiresIn ?? 600;
   let deviceFlow = true;
   let revocation = options.revocationEndpoint ?? true;
+  const tokenType = options.tokenType === undefined ? "Bearer" : options.tokenType;
+  const acceptBearer = options.acceptBearer ?? true;
+  const metadataPath =
+    options.metadataLocation === "in-prefix"
+      ? `${prefix}/.well-known/oauth-authorization-server`
+      : `/.well-known/oauth-authorization-server${prefix}`;
   let metadataMode: MetadataMode = "ok";
   let versionMode: VersionMode = "ok";
   let invalidKey: "anonymous" | "forbidden" = "anonymous";
-  let deviceOverride: { status: number; body: string; contentType?: string } | null = null;
-  let tokenOverride: { status: number; body: string; contentType?: string } | null = null;
+  let deviceOverride: {
+    status: number;
+    body: string;
+    contentType?: string;
+  } | null = null;
+  let tokenOverride: {
+    status: number;
+    body: string;
+    contentType?: string;
+  } | null = null;
   let slowDowns = 0;
   const redirects = new Map<string, { location: string; status: number }>();
 
@@ -244,7 +278,9 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
     res.end(JSON.stringify(body));
   };
   const raw = (res: ServerResponse, r: { status: number; body: string; contentType?: string }) => {
-    res.writeHead(r.status, { "content-type": r.contentType ?? "application/json" });
+    res.writeHead(r.status, {
+      "content-type": r.contentType ?? "application/json",
+    });
     res.end(r.body);
   };
 
@@ -257,7 +293,9 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
   const metadata = () => ({
     issuer: metadataMode === "wrong-issuer" ? "https://not-this-galaxy.example" : baseUrl,
     ...(deviceFlow
-      ? { device_authorization_endpoint: `${baseUrl}/oauth/device_authorization` }
+      ? {
+          device_authorization_endpoint: `${baseUrl}/oauth/device_authorization`,
+        }
       : {}),
     token_endpoint: `${baseUrl}/oauth/token`,
     ...(revocation ? { revocation_endpoint: `${baseUrl}/oauth/revoke` } : {}),
@@ -310,7 +348,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
       }
     }
 
-    if (method === "GET" && path === `/.well-known/oauth-authorization-server${prefix}`) {
+    if (method === "GET" && path === metadataPath) {
       switch (metadataMode) {
         case "not-found":
           // As a real Galaxy 26.1 answers: an HTML 404 page, not JSON.
@@ -375,7 +413,10 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
         tokenFaults -= 1;
         if ("reset" in tokenFault) return void req.socket.destroy();
         if ("hang" in tokenFault) return; // no answer: the client's own signal must end the request
-        res.writeHead(tokenFault.status, { "content-type": "text/html", ...tokenFault.headers });
+        res.writeHead(tokenFault.status, {
+          "content-type": "text/html",
+          ...tokenFault.headers,
+        });
         return void res.end(tokenFault.body ?? "<html>fault</html>");
       }
       // RFC 6749 §3.2.1: a public client identifies itself on every request to the token endpoint.
@@ -434,7 +475,7 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
       const token = mint(a);
       json(res, 200, {
         access_token: token,
-        token_type: "Bearer",
+        ...(tokenType === null ? {} : { token_type: tokenType }),
         ...(expiresIn === null ? {} : { expires_in: expiresIn }),
         ...(a.scopes === undefined ? {} : { scope: a.scopes.join(" ") }),
       });
@@ -464,7 +505,9 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
 
     if (method === "GET" && local === "/api/version") {
       if (versionMode === "redirect")
-        return void (res.writeHead(302, { location: "https://elsewhere.example/api/version" }),
+        return void (res.writeHead(302, {
+          location: "https://elsewhere.example/api/version",
+        }),
         res.end());
       if (versionMode === "html") {
         res.writeHead(200, { "content-type": "text/html" });
@@ -481,7 +524,9 @@ export async function startFakeGalaxy(options: FakeGalaxyOptions = {}): Promise<
         return;
       }
       const key = req.headers["x-api-key"];
-      const t = typeof key === "string" ? tokens.get(key) : undefined;
+      const bearer = /^Bearer (\S+)$/i.exec(req.headers.authorization ?? "")?.[1];
+      const presented = typeof key === "string" ? key : acceptBearer ? bearer : undefined;
+      const t = presented === undefined ? undefined : tokens.get(presented);
       if (tokenIsValid(t)) {
         json(res, 200, {
           id: `fake-id-${t.username}`,
