@@ -137,8 +137,8 @@ beat the profile's.
 A `--profile` name that is not in `~/.planemo.yml` (a typo, or a file that cannot be read) is an
 error (exit 64), not a profile with nothing in it: it never falls back to a stored login, which
 could be for a different Galaxy than the one you named. The `gxy auth` commands other than `login`
-refuse it too. `login` ignores `--profile` altogether (it warns so) and logs in whether or not the
-profile exists.
+refuse it too. `login` refuses `--profile` altogether, for any name, whether or not the profile
+exists.
 
 A key that is not the stored login's is only ever sent to a Galaxy that something named, never to
 the only stored login by default: with a key and no Galaxy named, `gxy` stops with "No Galaxy
@@ -167,11 +167,13 @@ source: the line says `none` and why, and `key_source` is `null`.
 
 The `auth` commands (except `login`) pick their Galaxy by this same order, so `gxy auth status` and
 `gxy get_user` cannot disagree about which Galaxy a set of flags and variables means; `--host` is
-the same as `--url`. They never use a key from
-`--api-key`, `GALAXY_API_KEY`, `.env` or a profile, and warn once on stderr if `--api-key` is given
-(and, for `auth login` only, `--profile`); `auth status` does not warn, as it reports on them. `auth login` never takes its host from `.env` or a
-profile (a repository must not choose where your key goes): give `--host` or set `GALAXY_URL`. When nothing
-names a Galaxy and a person is at the terminal, `auth login` asks "Galaxy URL (for example
+the same as `--url`. They never use a key from `--api-key`, `GALAXY_API_KEY`, `.env` or a profile,
+so they refuse `--api-key` with a usage error (exit 64, even with `--quiet`) before they do anything,
+except `auth status`, which reports on the key an operation would use, `--api-key` included. `auth login`
+never takes its host from `.env` or a profile (a repository must not choose where your key goes):
+give `--host` or set `GALAXY_URL`. `--profile` and `--api-key` do not apply to it, so it refuses
+either one with the same usage error before it reads stdin, asks or sends anything: pipe the key in
+with `--with-token`. When nothing names a Galaxy and a person is at the terminal, `auth login` asks "Galaxy URL (for example
 https://usegalaxy.org):" instead. Without a terminal, or with `--with-token` (stdin is for the key), it
 still stops with a usage error (exit 64).
 

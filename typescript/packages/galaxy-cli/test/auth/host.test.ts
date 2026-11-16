@@ -231,7 +231,6 @@ describe("operations and auth pick the same Galaxy", () => {
       kind: "usage",
       message: "Unknown --profile typo: no such profile in ~/.planemo.yml",
     });
-    // Login does not use the profile (it warns that it is ignored), so it is not refused there.
-    expect(await deps.resolveHost(undefined, "login")).toBe(A);
+    // Login never gets this far with a --profile: register.ts refuses the flag outright (register.test.ts).
   });
 });

@@ -39,13 +39,11 @@ export function createAuthDeps(
     whoami: createWhoami(),
     // The rule operations use (config.ts), so the two cannot pick different Galaxies. The global
     // `--url` counts as the flag and `--profile` supplies its planemo URL; login ignores `.env`
-    // and the profile (see pickHost).
+    // (see pickHost) and refuses `--profile` before it gets here (register.ts).
     resolveHost: async (explicit, purpose) => {
       const g = globals();
       const src = loadSources();
-      // Login never reads the profile and already warns that it is ignored, so an unknown name
-      // changes nothing it does; every other purpose refuses one.
-      if (purpose !== "login") requireProfile(g, src);
+      requireProfile(g, src);
       return resolveHost({
         explicit: explicit ?? g.url,
         env,
@@ -67,10 +65,7 @@ export function createAuthDeps(
     ignoredLoginHost: () => {
       const src = loadSources();
       const dotenv = src.dotenv.GALAXY_URL;
-      if (dotenv) return { source: "dotenv", url: dotenv };
-      const profileName = globals().profile;
-      const profile = profileName ? src.profiles[profileName]?.galaxy_url : undefined;
-      return profile ? { source: "profile", url: profile } : undefined;
+      return dotenv ? { source: "dotenv", url: dotenv } : undefined;
     },
     openBrowser: (url) => openBrowser(url, env),
     canOpenBrowser: () => canOpenBrowser(env),
