@@ -220,7 +220,11 @@ describe("the auth commands", () => {
         invokedAs: "gxy",
         makeAuthDeps: (name) => {
           const real = createAuthDeps(name, () => program.opts());
-          return { ...h.deps, resolveHost: real.resolveHost, checkProfile: real.checkProfile };
+          return {
+            ...h.deps,
+            resolveHost: (explicit, purpose) => real.resolveHost(explicit, purpose),
+            checkProfile: () => real.checkProfile?.(),
+          };
         },
       });
       await program.parseAsync(["node", "gxy", "--profile", "typo", "auth", "status", ...extra]);
