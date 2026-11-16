@@ -167,6 +167,12 @@ export interface AuthDeps {
    */
   resolveHost(explicit?: string, purpose?: "login"): Promise<BaseUrl>;
   /**
+   * Throws `AuthError("usage")` when `--profile` names a profile that is not in `~/.planemo.yml`.
+   * For a command that can run without resolving a host (`status` lists every login), so it
+   * does not report on a profile that does not exist. Absent means there is no profile to check.
+   */
+  checkProfile?(): void;
+  /**
    * The Galaxy named by `.env` (`GALAXY_URL`), which `login` ignores by design; lets it say so
    * when that differs from the host it uses. Absent means none.
    */
