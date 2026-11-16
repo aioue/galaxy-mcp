@@ -209,157 +209,149 @@ function reportLogin(
 /** A key pasted on stdin, or typed at a terminal (without echo, so it stays off the screen and out of scrollback). */
 async function loginWithToken(ctx: LoginContext): Promise<number> {
   const { deps, opts, signal, baseUrl, host, err } = ctx;
-    const pipeIn = `printf %s "$KEY" | ${deps.commandName} auth login --host ${baseUrl} --with-token`;
-    let typed: string;
-    // Whether to prompt follows stdin alone: a terminal on stdin is read in cooked mode, which
-    // echoes the key and waits for Ctrl-D, whatever stderr is. The prompt goes to stderr, so when
-    // that is redirected (`2>log`, `| tee`) there is nowhere to show it, and the key is refused
-    // rather than asked for blind.
-    const terminal = isRawCapable(deps.io.stdin) ? deps.io.stdin : undefined;
-    const atTerminal = terminal !== undefined;
-    if (terminal && !deps.io.interactive)
-      throw new AuthError(
-        "usage",
-        `stdin is a terminal but stderr is not, so there is nowhere to show the key prompt. Pipe the key in: ${pipeIn}`,
-      );
-    if (terminal) {
-      deps.io.stderr.write("Paste your Galaxy API key: ");
-      typed = await readSecret(terminal, signal);
-      deps.io.stderr.write("\n");
-    } else {
-      typed = await readPiped(deps.io.stdin, signal);
-    }
-    const raw = typed.trim();
-    if (!raw)
-      throw new AuthError(
-        "usage",
-        atTerminal
-          ? `No API key entered. Paste it at the prompt, or pipe it in: ${pipeIn}`
-          : `No API key on stdin. Pipe it in: ${pipeIn}`,
-      );
-    if (/[\r\n]/.test(raw))
-      throw new AuthError("usage", "Expected a single-line API key on stdin, got several lines.");
-    const who = await untilAborted(deps.whoami(baseUrl, raw, signal), signal);
-    const login: StoredLogin = {
-      baseUrl,
-      username: who.username,
-      ...(who.email ? { email: who.email } : {}),
-      token: raw,
-      method: "pasted",
-      scopes: [],
-      expiresAt: null,
-      obtainedAt: deps.now().toISOString(),
-    };
-    const put = await storeLogin(deps, opts, signal, host, who, login);
-    reportLogin(err, host, who, put, null);
+  const pipeIn = `printf %s "$KEY" | ${deps.commandName} auth login --host ${baseUrl} --with-token`;
+  let typed: string;
+  // Whether to prompt follows stdin alone: a terminal on stdin is read in cooked mode, which
+  // echoes the key and waits for Ctrl-D, whatever stderr is. The prompt goes to stderr, so when
+  // that is redirected (`2>log`, `| tee`) there is nowhere to show it, and the key is refused
+  // rather than asked for blind.
+  const terminal = isRawCapable(deps.io.stdin) ? deps.io.stdin : undefined;
+  const atTerminal = terminal !== undefined;
+  if (terminal && !deps.io.interactive)
+    throw new AuthError(
+      "usage",
+      `stdin is a terminal but stderr is not, so there is nowhere to show the key prompt. Pipe the key in: ${pipeIn}`,
+    );
+  if (terminal) {
+    deps.io.stderr.write("Paste your Galaxy API key: ");
+    typed = await readSecret(terminal, signal);
+    deps.io.stderr.write("\n");
+  } else {
+    typed = await readPiped(deps.io.stdin, signal);
+  }
+  const raw = typed.trim();
+  if (!raw)
+    throw new AuthError(
+      "usage",
+      atTerminal
+        ? `No API key entered. Paste it at the prompt, or pipe it in: ${pipeIn}`
+        : `No API key on stdin. Pipe it in: ${pipeIn}`,
+    );
+  if (/[\r\n]/.test(raw))
+    throw new AuthError("usage", "Expected a single-line API key on stdin, got several lines.");
+  const who = await untilAborted(deps.whoami(baseUrl, raw, signal), signal);
+  const login: StoredLogin = {
+    baseUrl,
+    username: who.username,
+    ...(who.email ? { email: who.email } : {}),
+    token: raw,
+    method: "pasted",
+    scopes: [],
+    expiresAt: null,
+    obtainedAt: deps.now().toISOString(),
+  };
+  const put = await storeLogin(deps, opts, signal, host, who, login);
+  reportLogin(err, host, who, put, null);
   return 0;
 }
 
 /** The device flow (RFC 8628). */
 async function loginWithDeviceFlow(ctx: LoginContext): Promise<number> {
   const { deps, opts, signal, baseUrl, host, err, session } = ctx;
-    let server: AuthServer;
-    try {
-      server = await untilAborted(deps.discover(baseUrl, signal), signal);
-    } catch (e) {
-      // Discovery says "unsupported" only when there is no usable metadata (404, not JSON), which
-      // is what Galaxy 26.1 gives; `noDeviceLogin` points at `--with-token`.
-      if (e instanceof AuthError && e.kind === "unsupported")
-        throw noDeviceLogin(deps, host, baseUrl, "it publishes no OAuth metadata");
-      throw e;
-    }
-    if (!server.supportsDeviceFlow)
-      throw noDeviceLogin(deps, host, baseUrl, "it may be switched off by its admins");
-    const scopes = opts.scopes ?? [];
-    // A cancel during discovery must not create a code on the server.
-    signal.throwIfAborted();
-    const pending = await untilAborted(
-      server.startDeviceLogin(scopes.length ? scopes : undefined, signal),
-      signal,
+  let server: AuthServer;
+  try {
+    server = await untilAborted(deps.discover(baseUrl, signal), signal);
+  } catch (e) {
+    // Discovery says "unsupported" only when there is no usable metadata (404, not JSON), which
+    // is what Galaxy 26.1 gives; `noDeviceLogin` points at `--with-token`.
+    if (e instanceof AuthError && e.kind === "unsupported")
+      throw noDeviceLogin(deps, host, baseUrl, "it publishes no OAuth metadata");
+    throw e;
+  }
+  if (!server.supportsDeviceFlow)
+    throw noDeviceLogin(deps, host, baseUrl, "it may be switched off by its admins");
+  const scopes = opts.scopes ?? [];
+  // A cancel during discovery must not create a code on the server.
+  signal.throwIfAborted();
+  const pending = await untilAborted(
+    server.startDeviceLogin(scopes.length ? scopes : undefined, signal),
+    signal,
+  );
+
+  // `startDeviceLogin` checks this too; this is defence in depth, for any other `AuthServer`.
+  // The normalised URL is what is printed and opened: the raw string can hold a tab or newline
+  // that parsing drops.
+  const verificationUri = trustedVerificationUri(pending.verificationUri, baseUrl);
+  if (verificationUri === undefined) {
+    throw new AuthError(
+      "protocol",
+      `${host} asked for the code to be entered at ${sanitize(pending.verificationUri)}, which is not an https page on ${host}. ` +
+        "That could send you to another site, so the login was stopped. Paste an API key instead: " +
+        `${deps.commandName} auth login --host ${baseUrl} --with-token`,
     );
+  }
 
-    // `startDeviceLogin` checks this too; this is defence in depth, for any other `AuthServer`.
-    // The normalised URL is what is printed and opened: the raw string can hold a tab or newline
-    // that parsing drops.
-    const verificationUri = trustedVerificationUri(pending.verificationUri, baseUrl);
-    if (verificationUri === undefined) {
-      throw new AuthError(
-        "protocol",
-        `${host} asked for the code to be entered at ${sanitize(pending.verificationUri)}, which is not an https page on ${host}. ` +
-          "That could send you to another site, so the login was stopped. Paste an API key instead: " +
-          `${deps.commandName} auth login --host ${baseUrl} --with-token`,
-      );
-    }
+  err(`Requesting access to ${host}`);
+  err(`  Scopes  ${scopes.length ? sanitize(scopes.join(" ")) : "server default"}`);
+  err("");
+  // RFC 8628 §5.4 (remote phishing): a person can be talked into approving a code they never
+  // started, so the terminal that did start one says to approve only that. Only the user code is
+  // printed; the device code never leaves `waitForApproval`.
+  err("! Only approve this code if you ran this command yourself.");
+  err(`  One-time code: ${sanitize(pending.userCode)}`);
+  err(`  Enter it at ${sanitize(verificationUri)}`);
 
-    err(`Requesting access to ${host}`);
-    err(`  Scopes  ${scopes.length ? sanitize(scopes.join(" ")) : "server default"}`);
-    err("");
-    // RFC 8628 §5.4 (remote phishing): a person can be talked into approving a code they never
-    // started, so the terminal that did start one says to approve only that. Only the user code is
-    // printed; the device code never leaves `waitForApproval`.
-    err("! Only approve this code if you ran this command yourself.");
-    err(`  One-time code: ${sanitize(pending.userCode)}`);
-    err(`  Enter it at ${sanitize(verificationUri)}`);
+  // As `gh auth login` does: offer on a terminal and wait for Enter, and print the URL and nothing
+  // more when not interactive, so a script or an agent never has a browser opened for it.
+  const canOpen = opts.browser !== false && deps.io.interactive && deps.canOpenBrowser();
+  if (canOpen) {
+    err("Press Enter to open that page in your browser…");
+    session.reader ??= lineReader(deps.io.stdin);
+    // Polling starts at once: approving on another device must not wait for Enter.
+    void session.reader.next().then(async (line) => {
+      if (line === null || signal.aborted) return;
+      if (!(await deps.openBrowser(verificationUri)))
+        err("Could not open a browser. Open the page yourself.");
+    });
+  }
+  err(
+    `Waiting for approval (code expires in ${formatCountdown(pending.expiresAt.getTime() - deps.now().getTime())})…`,
+  );
+  const grant: TokenGrant = await pending.waitForApproval(signal);
 
-    // As `gh auth login` does: offer on a terminal and wait for Enter, and print the URL and nothing
-    // more when not interactive, so a script or an agent never has a browser opened for it.
-    const canOpen =
-      opts.browser !== false && deps.io.interactive && deps.canOpenBrowser();
-    if (canOpen) {
-      err("Press Enter to open that page in your browser…");
-      session.reader ??= lineReader(deps.io.stdin);
-      // Polling starts at once: approving on another device must not wait for Enter.
-      void session.reader.next().then(async (line) => {
-        if (line === null || signal.aborted) return;
-        if (!(await deps.openBrowser(verificationUri)))
-          err("Could not open a browser. Open the page yourself.");
-      });
-    }
-    err(
-      `Waiting for approval (code expires in ${formatCountdown(pending.expiresAt.getTime() - deps.now().getTime())})…`,
+  // The server has issued a token. If it cannot be checked or kept, nothing local points at
+  // it, so it would stay valid (an admin's too) until it expires: take it back.
+  let who: WhoAmI;
+  let put: PutResult;
+  let expiresAt: string | null;
+  try {
+    who = await untilAborted(deps.whoami(baseUrl, grant.accessToken, signal), signal);
+    const now = deps.now();
+    expiresAt =
+      grant.expiresIn !== undefined
+        ? new Date(now.getTime() + grant.expiresIn * 1000).toISOString()
+        : null;
+    put = await storeLogin(deps, opts, signal, host, who, {
+      baseUrl,
+      username: who.username,
+      ...(who.email ? { email: who.email } : {}),
+      token: grant.accessToken,
+      method: "device",
+      scopes: grant.scopes,
+      expiresAt,
+      obtainedAt: now.toISOString(),
+    });
+  } catch (e) {
+    session.cancelled = await revokeAfterFailure(
+      server,
+      grant.accessToken,
+      host,
+      err,
+      signal.aborted,
     );
-    const grant: TokenGrant = await pending.waitForApproval(signal);
-
-    // The server has issued a token. If it cannot be checked or kept, nothing local points at
-    // it, so it would stay valid (an admin's too) until it expires: take it back.
-    let who: WhoAmI;
-    let put: PutResult;
-    let expiresAt: string | null;
-    try {
-      who = await untilAborted(deps.whoami(baseUrl, grant.accessToken, signal), signal);
-      const now = deps.now();
-      expiresAt =
-        grant.expiresIn !== undefined
-          ? new Date(now.getTime() + grant.expiresIn * 1000).toISOString()
-          : null;
-      put = await storeLogin(
-        deps,
-        opts,
-        signal,
-        host,
-        who,
-        {
-          baseUrl,
-          username: who.username,
-          ...(who.email ? { email: who.email } : {}),
-          token: grant.accessToken,
-          method: "device",
-          scopes: grant.scopes,
-          expiresAt,
-          obtainedAt: now.toISOString(),
-        },
-      );
-    } catch (e) {
-      session.cancelled = await revokeAfterFailure(
-        server,
-        grant.accessToken,
-        host,
-        err,
-        signal.aborted,
-      );
-      throw e;
-    }
-    reportLogin(err, host, who, put, expiresAt);
+    throw e;
+  }
+  reportLogin(err, host, who, put, expiresAt);
   return 0;
 }
 

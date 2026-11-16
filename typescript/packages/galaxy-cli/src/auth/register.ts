@@ -118,10 +118,11 @@ export function registerAuth(program: Command, makeDeps: (commandName: string) =
     // by `login` itself with its own bounded call; a code, or a token issued too late to see,
     // expires on its own.
     .action((o: LoginOptions) =>
-      run((deps) => interruptible((signal) => loginCommand(
-            { ...o, signal, quiet: program.opts<{ quiet?: boolean }>().quiet },
-            deps,
-          ))),
+      run((deps) =>
+        interruptible((signal) =>
+          loginCommand({ ...o, signal, quiet: program.opts<{ quiet?: boolean }>().quiet }, deps),
+        ),
+      ),
     );
 
   auth

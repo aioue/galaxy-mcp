@@ -295,4 +295,3 @@ describe("interrupting login and logout", () => {
     },
   );
 });
-
