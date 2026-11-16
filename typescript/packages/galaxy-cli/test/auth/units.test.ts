@@ -85,17 +85,17 @@ const epipe = () => Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
 /** Any other stream error, which the handler must not swallow. */
 const eio = () => Object.assign(new Error("disk"), { code: "EIO" });
 
-// The streams here are `PassThrough`s and `exit` is a function that records its code, so the
-// process under test is never ended. `codes` is everything that would have been passed to it.
+// The streams here are `PassThrough`s, so the process under test is never touched.
 describe("exitQuietlyOnEpipe", () => {
-  // Exit 0, because the reader leaving (`| head -c1`) is not a failure and the output was wanted.
-  // An EPIPE is the only error swallowed: anything else rethrows, or a real fault would vanish.
-  it("on stdout exits quietly with 0, and rethrows any other error", () => {
-    const stdout = new PassThrough();
-    const codes: number[] = [];
-    exitQuietlyOnEpipe({ stdout, stderr: new PassThrough() }, (c) => void codes.push(c));
-    stdout.emit("error", epipe());
-    expect(codes).toEqual([0]);
+  // The reader leaving (`| head -c1`) is not a failure, but the run must still finish with the exit
+  // code the command computes, so stdout goes quiet like stderr and nothing exits. An EPIPE is the
+  // only error swallowed: anything else rethrows, or a real fault would vanish.
+  it("on stdout does not exit, silences later stdout writes, and rethrows any other error", () => {
+    const [stdout, stderr] = [new PassThrough(), new PassThrough()];
+    exitQuietlyOnEpipe({ stdout, stderr });
+    expect(() => stdout.emit("error", epipe())).not.toThrow();
+    expect(stdout.write("more\n")).toBe(true);
+    expect(stdout.read()).toBeNull();
     expect(() => stdout.emit("error", eio())).toThrow("disk");
   });
 
@@ -104,10 +104,8 @@ describe("exitQuietlyOnEpipe", () => {
   // exit code still says how it went. `stderr.read()` being null shows the later write went nowhere.
   it("on stderr does not exit, silences later stderr writes, and rethrows any other error", () => {
     const [stdout, stderr] = [new PassThrough(), new PassThrough()];
-    const codes: number[] = [];
-    exitQuietlyOnEpipe({ stdout, stderr }, (c) => void codes.push(c));
+    exitQuietlyOnEpipe({ stdout, stderr });
     expect(() => stderr.emit("error", epipe())).not.toThrow();
-    expect(codes).toEqual([]);
     expect(stderr.write("more\n")).toBe(true);
     expect(stderr.read()).toBeNull();
     expect(() => stderr.emit("error", eio())).toThrow("disk");
