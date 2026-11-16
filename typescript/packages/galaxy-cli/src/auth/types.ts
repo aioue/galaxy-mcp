@@ -128,18 +128,25 @@ export interface AuthServer {
  * say enough), `store` is 65 (EX_DATAERR: the credential file cannot be used as it is), `network`
  * is 69 (EX_UNAVAILABLE), `unsupported`, `protocol` and `insecure` are 76 (EX_PROTOCOL: the address,
  * or what its server supplied, is not something this can use; plain http is 76 too, though the
- * person typed it, see `exitCodeForAuthError`), and `not_logged_in`, `denied` and `expired` are 77
- * (EX_NOPERM: there is no permission to do this).
+ * person typed it, see `exitCodeForAuthError`), `not_logged_in`, `denied` and `expired` are 77
+ * (EX_NOPERM: there is no permission to do this), and `leftover` is 1 (the command ran, but not
+ * everything was removed).
  */
 export type AuthErrorKind =
   /**
-   * The Galaxy publishes no OAuth metadata, or has the device flow switched off. Also what
-   * `CombinedStore.delete` throws when the keyring will not confirm a secret is gone.
+   * The Galaxy publishes no OAuth metadata, has the device flow switched off, or has no
+   * revocation endpoint.
    */
   | "unsupported"
   /**
-   * The user denied the request on the approval page, or `put` refused to keep an admin token
-   * in the plaintext file (`requireKeyring`).
+   * What `CombinedStore.delete` throws when the login record is gone but the keyring would not
+   * confirm the secret is: it may remain there. `logout` reports it and exits 1.
+   */
+  | "leftover"
+  /**
+   * Two unrelated sources share this kind, and both are exit 77 on purpose: `put` refused to keep
+   * an admin token in the plaintext file (`requireKeyring`), or the person said no on the approval
+   * page. Callers must not use it to tell them apart.
    */
   | "denied"
   /** The user code expired before anyone approved it. */
@@ -225,10 +232,9 @@ export interface AuthDeps {
    * Which source an operation run now would take its key from for this Galaxy (`config.ts`'s
    * order, with the flags and environment of this run), with the text to show for it. `id` is
    * null when the operation would go to another Galaxy or would not run, and the label says so.
-   * `stored` is every stored login's base URL. Absent means a stored login, or `GALAXY_API_KEY`
-   * when it is set.
+   * `stored` is every stored login's base URL.
    */
-  keySourceFor?(
+  keySourceFor(
     baseUrl: BaseUrl,
     login: StoredLogin | undefined,
     stored: readonly BaseUrl[],

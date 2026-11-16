@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
-import { describeKeyReport, describeKeySource, keySourceFor, loadSources, loadSourcesAsync, resolveConnection, type GlobalFlags, type Sources } from "../src/config";
+import { chooseKey, describeKeyReport, describeKeySource, keySourceFor, loadSources, loadSourcesAsync, resolveConnection, type GlobalFlags, type Sources } from "../src/config";
 import { normalizeBaseUrl } from "../src/auth/base-url";
 import { AuthError, type StoredLogin } from "../src/auth/types";
 import { DAY, FAKE_TOKEN, FakeStore, fakeLogin, useTempDir } from "./auth/harness";
@@ -22,6 +22,31 @@ describe("resolveConnection", () => {
     expect(resolveConnection({ profile: "prod" }, { env: {}, dotenv, profiles })).toMatchObject({ baseUrl: "https://prof.example", apiKey: "PK" });
     // Without --profile the profile is not read at all: .env's URL is used.
     expect(resolveConnection({}, { env: {}, dotenv: { ...dotenv, GALAXY_API_KEY: "DK" }, profiles })).toMatchObject({ baseUrl: "https://dot.example", apiKey: "DK" });
+  });
+  // A name that is not in ~/.planemo.yml is an error, not "no profile": it must not fall through to
+  // a stored login, an environment key or an empty profiles map (an unreadable file reads as that).
+  it("refuses an unknown --profile, whatever else could answer", () => {
+    const profiles = { prod: { galaxy_url: "https://prof.example", galaxy_user_key: "PK" } };
+    const stored = fakeLogin({ baseUrl: normalizeBaseUrl("https://stored.example"), token: "STORED", expiresAt: null });
+    const cases: Sources[] = [
+      { env: {}, dotenv: {}, profiles, storedBaseUrls: [stored.baseUrl], storedLogin: stored },
+      { env: { GALAXY_URL: "https://env.example", GALAXY_API_KEY: "ENVKEY" }, dotenv: {}, profiles },
+      { env: { GALAXY_URL: "https://env.example", GALAXY_API_KEY: "ENVKEY" }, dotenv: {}, profiles: {} },
+    ];
+    for (const src of cases) {
+      let thrown: unknown;
+      try {
+        resolveConnection({ profile: "prod-typo" }, src);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(AuthError);
+      expect((thrown as AuthError).kind).toBe("usage");
+      expect((thrown as Error).message).toBe("Unknown --profile prod-typo: no such profile in ~/.planemo.yml");
+    }
+    // Names are not looked up on the prototype, and a printed name is cleaned.
+    expect(() => resolveConnection({ profile: "toString" }, { env: {}, dotenv: {}, profiles })).toThrow(/Unknown --profile toString/);
+    expect(() => resolveConnection({ profile: "a\u001b[31mb" }, { env: {}, dotenv: {}, profiles })).toThrow(/^Unknown --profile a[^\u001b]*b:/);
   });
   it("sends the profile's key to the profile's URL, not to a hostile .env or GALAXY_URL", () => {
     const profiles = { p: { galaxy_url: "https://prof.example", galaxy_user_key: "PK" } };
@@ -431,6 +456,11 @@ describe("loadSourcesAsync", () => {
       expect(s.storeProblem).toBeUndefined();
     }
   });
+  it("refuses an unknown --profile before it reads the store", async () => {
+    const boom = seeded();
+    boom.list = async () => { throw new Error("store was read"); };
+    await expect(loadSourcesAsync({ profile: "nope" }, { store: boom, base: base() })).rejects.toThrow(/^Unknown --profile nope/);
+  });
   // A broken store is a warning for an operation, not a usage error: see the last case in exit.test.ts.
   it("turns store failures into a problem rather than throwing", async () => {
     const boom = seeded();
@@ -543,6 +573,54 @@ describe("loadSources (the files and environment)", () => {
       const s = loadSources();
       expect(s.dotenv).toEqual({});
       expect(s.profiles).toEqual({});
+    });
+  });
+});
+
+// The decision on its own: which Galaxy and key, or the reason for none, with no wording.
+describe("chooseKey", () => {
+  const url = normalizeBaseUrl("https://galaxy.example.org");
+  const now = new Date("2026-06-01T00:00:00.000Z");
+  const valid = fakeLogin({ baseUrl: url, token: "STORED", expiresAt: "2030-01-01T00:00:00.000Z" });
+  const expired = fakeLogin({ baseUrl: url, token: "STORED", expiresAt: "2026-05-01T00:00:00.000Z" });
+  const src = (over: Partial<Sources> = {}): Sources => ({ env: {}, dotenv: {}, profiles: {}, storedBaseUrls: [url], now, ...over });
+
+  it("chooses the winning source with its host and key", () => {
+    expect(chooseKey({}, src({ storedLogin: valid }))).toMatchObject({ ok: true, baseUrl: url, apiKey: "STORED", keySource: "stored", picked: { url, source: "stored" } });
+    expect(chooseKey({ url, apiKey: "K" }, src({ storedLogin: valid }))).toMatchObject({ ok: true, baseUrl: url, apiKey: "K", keySource: "flag" });
+    expect(chooseKey({}, src({ env: { GALAXY_URL: url, GALAXY_API_KEY: "E" } }))).toMatchObject({ ok: true, apiKey: "E", keySource: "env" });
+  });
+  it("refuses with host when the host rule does", () => {
+    const two = src({ storedBaseUrls: [url, normalizeBaseUrl("https://b.example.org")] });
+    expect(chooseKey({}, two)).toMatchObject({ ok: false, reason: "host", picked: undefined, error: expect.any(AuthError) });
+  });
+  it("refuses with no_credentials, and the Galaxy named when there is one", () => {
+    expect(chooseKey({}, src({ storedBaseUrls: [] }))).toMatchObject({ ok: false, reason: "no_credentials", named: undefined, picked: undefined });
+    expect(chooseKey({ url: "https://other.example.org" }, src({ storedLogin: valid }))).toMatchObject({ ok: false, reason: "no_credentials", named: "https://other.example.org" });
+  });
+  it("refuses a profile key with no Galaxy named, or only a .env one", () => {
+    const profiles = { p: { galaxy_user_key: "PK" } };
+    expect(chooseKey({ profile: "p" }, src({ profiles, storedLogin: valid }))).toMatchObject({ ok: false, reason: "profile_no_url" });
+    expect(chooseKey({ profile: "p" }, src({ profiles, dotenv: { GALAXY_URL: url } }))).toMatchObject({ ok: false, reason: "profile_dotenv_host" });
+  });
+  it("refuses with login_expired, or uses a .env key for a named host and says the login ran out", () => {
+    expect(chooseKey({}, src({ storedLogin: expired }))).toMatchObject({ ok: false, reason: "login_expired", baseUrl: url });
+    const keyed = chooseKey({}, src({ storedLogin: expired, dotenv: { GALAXY_URL: url, GALAXY_API_KEY: "D" } }));
+    expect(keyed).toMatchObject({ ok: true, keySource: "dotenv", apiKey: "D", expired: { baseUrl: url } });
+  });
+  describe("with a stored login whose token cannot be read", () => {
+    const unreadableStored = url;
+    it("refuses with stored_unreadable when nothing else could be used", () => {
+      expect(chooseKey({}, src(), { unreadableStored })).toMatchObject({ ok: false, reason: "stored_unreadable" });
+      // A .env key that names no Galaxy would not be sent to the stored login's.
+      expect(chooseKey({}, src({ dotenv: { GALAXY_API_KEY: "D" } }), { unreadableStored })).toMatchObject({ ok: false, reason: "stored_unreadable" });
+    });
+    it("uses the keys below the login, and keeps the refusals of the keys above it", () => {
+      expect(chooseKey({}, src({ dotenv: { GALAXY_URL: url, GALAXY_API_KEY: "D" } }), { unreadableStored })).toMatchObject({ ok: true, keySource: "dotenv" });
+      expect(chooseKey({}, src({ env: { GALAXY_API_KEY: "E" } }), { unreadableStored })).toMatchObject({ ok: false, reason: "no_credentials" });
+    });
+    it("does not apply to another Galaxy", () => {
+      expect(chooseKey({ url: "https://other.example.org" }, src(), { unreadableStored })).toMatchObject({ ok: false, reason: "no_credentials" });
     });
   });
 });

@@ -6,6 +6,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { statusCommand } from "../../src/auth/commands/status";
 import { createWhoami } from "../../src/auth/whoami";
+import { normalizeBaseUrl } from "../../src/auth/base-url";
 import { AuthError } from "../../src/auth/types";
 import { FAKE_TOKEN, HOST, OTHER, fakeLogin, harness, makeTokenUnreadable } from "./harness";
 
@@ -107,6 +108,14 @@ describe("auth status", () => {
       const j = harness({ stored: [fakeLogin()], env: { GALAXY_API_KEY: "x" } });
       await statusCommand({ json: true }, j.deps);
       expect((JSON.parse(j.cap.out) as { key_source: string }[])[0]!.key_source).toBe("env");
+    });
+    it("does not say .env takes precedence when it stands in for an expired login", async () => {
+      const h = harness({ stored: [expiredLogin()] });
+      h.deps.keySourceFor = () => ({ id: "dotenv", label: ".env GALAXY_API_KEY" });
+      await statusCommand({}, h.deps);
+      expect(h.cap.err).not.toContain("takes precedence");
+      expect(h.cap.err).toContain("Key used by operations: .env GALAXY_API_KEY");
+      expect(h.cap.err).toContain("The .env key is used instead");
     });
     it("says stored login, with no warning, when nothing outranks it", async () => {
       const h = harness({ stored: [fakeLogin()] });
@@ -253,11 +262,37 @@ describe("auth status", () => {
 
     it("costs one timeout, not one per host", async () => {
       const h = twoLogins();
+      h.store.seed(fakeLogin({ baseUrl: normalizeBaseUrl("https://third.example.org") }));
       h.deps.whoami = () => new Promise(() => {});
       const started = Date.now();
-      expect(await statusCommand({ timeoutMs: 400 }, h.deps)).toBe(1);
-      expect(Date.now() - started).toBeLessThan(700);
-      expect(h.cap.err.match(/No answer from/g)).toHaveLength(2);
+      expect(await statusCommand({ timeoutMs: 1000 }, h.deps)).toBe(1);
+      // One after another would take 3000 ms; the margin is what a loaded runner may add.
+      expect(Date.now() - started).toBeLessThan(1800);
+      expect(h.cap.err.match(/No answer from/g)).toHaveLength(3);
+    });
+
+    // A check that throws (a login removed between `list` and `get`) ends the command at once, so the
+    // other hosts' requests are aborted and do not keep the process alive for their timeout.
+    it("aborts the other checks when one fails", async () => {
+      const h = twoLogins();
+      let signal: AbortSignal | undefined;
+      let asked!: () => void;
+      const hasAsked = new Promise<void>((r) => (asked = r));
+      h.deps.whoami = (_baseUrl, _token, s) => {
+        signal = s;
+        asked();
+        return new Promise(() => {});
+      };
+      const get = h.store.get.bind(h.store);
+      h.store.get = async (baseUrl) => {
+        if (baseUrl !== OTHER) return get(baseUrl);
+        await hasAsked;
+        // A store error is what ends the command (an unreadable token is only that host's).
+        throw new AuthError("store", "hosts.yml changed and cannot be used.");
+      };
+      expect(await statusCommand({ timeoutMs: 60_000 }, h.deps)).toBe(65);
+      expect(h.cap.err).toContain("hosts.yml changed and cannot be used.");
+      expect(signal?.aborted).toBe(true);
     });
 
     it("stops on Ctrl-C with 130", async () => {
@@ -321,6 +356,18 @@ describe("auth status", () => {
       expect(h.cap.err).toContain("Cancelled.");
       expect(h.cap.err).not.toContain("unavailable");
       expect(h.cap.out).toBe("");
+    });
+
+    // A store problem met while reading one host's token is reported as that, not as "token
+    // unavailable: log in", because logging in would meet the same refusal.
+    it("reports a store error met reading a token as such, exit 65", async () => {
+      const h = harness({ stored: [fakeLogin()] });
+      h.store.get = async () => {
+        throw new AuthError("store", "hosts.yml changed and cannot be used.");
+      };
+      expect(await statusCommand({}, h.deps)).toBe(65);
+      expect(h.cap.err).toContain("hosts.yml changed and cannot be used.");
+      expect(h.cap.err).not.toContain("auth login");
     });
 
     it("includes the token only with --show-token", async () => {

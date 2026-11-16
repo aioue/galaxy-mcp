@@ -298,7 +298,10 @@ export function harness(
     whoami: { username: "aioue", email: "a@example.org" },
     browserAvailable: true,
   };
-  const env = { ...(opts.hostFromEnv ? { GALAXY_URL: opts.hostFromEnv } : {}), ...opts.env };
+  const env: Record<string, string | undefined> = {
+    ...(opts.hostFromEnv ? { GALAXY_URL: opts.hostFromEnv } : {}),
+    ...opts.env,
+  };
   const deps: AuthDeps = {
     store,
     async discover() {
@@ -327,6 +330,13 @@ export function harness(
       return true;
     },
     canOpenBrowser: () => knobs.browserAvailable,
+    // `GALAXY_API_KEY` outranks a stored login; flags, profiles and `.env` are not in play here.
+    keySourceFor: (_baseUrl, login) =>
+      env.GALAXY_API_KEY
+        ? { id: "env", label: "GALAXY_API_KEY" }
+        : login === undefined
+          ? { id: null, label: "none (the stored token cannot be read)" }
+          : { id: "stored", label: "stored login" },
     now,
     env,
     io: { stdin, stdout: cap.stdout, stderr: cap.stderr, interactive: opts.interactive ?? false },

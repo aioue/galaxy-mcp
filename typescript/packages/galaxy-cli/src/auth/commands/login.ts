@@ -11,8 +11,10 @@ import {
   type TokenGrant,
   type WhoAmI,
 } from "../types";
-import { fail, formatCountdown, formatExpiry, hostOf, sanitize } from "./common";
-import { abortReason, withDeadline } from "../abort";
+import { fail, formatCountdown, hostOf, sanitize } from "./common";
+import { untilAborted, withDeadline } from "../abort";
+import { formatExpiry } from "../expiry";
+import { show } from "../file-store";
 import { trustedVerificationUri } from "../verification-uri";
 
 export interface LoginOptions {
@@ -24,6 +26,8 @@ export interface LoginOptions {
   insecureStorage?: boolean;
   /** Aborted on Ctrl-C by the caller (commands don't touch process signals). */
   signal?: AbortSignal;
+  /** The global `--quiet`: drops this command's own warnings, for a wrapper that fails on stderr output. */
+  quiet?: boolean;
 }
 
 /** Same Galaxy, however the URL was written; an unparsable one never matches. */
@@ -32,6 +36,20 @@ function sameGalaxy(a: string, b: string): boolean {
     return normalizeBaseUrl(a) === b;
   } catch {
     return false;
+  }
+}
+
+/**
+ * An ignored URL as it is safe to print: scheme, host and path only, so no `user:password@`, query
+ * or fragment, and no control characters, since `.env` and a profile come from a directory or
+ * file the person may not have written. Text that is not a URL is shown cleaned and cut short.
+ */
+function safeUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return show(`${u.protocol}//${hostOf(raw)}`);
+  } catch {
+    return show(raw);
   }
 }
 
@@ -51,23 +69,6 @@ function lineReader(stdin: NodeJS.ReadableStream) {
       rl.close();
     },
   };
-}
-
-/** Settle with `p`, or reject as soon as `signal` aborts (the work behind `p` is left to finish on its own). */
-function abortable<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) {
-    p.catch(() => undefined);
-    return Promise.reject(abortReason(signal));
-  }
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    p.then(resolve, reject).finally(() => {
-      signal.removeEventListener("abort", onAbort);
-    });
-  });
 }
 
 /** Printed before the token is stored, so it shows even when storing is refused. */
@@ -171,10 +172,10 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     // 1. Which Galaxy.
     let baseUrl: BaseUrl;
     if (opts.host) {
-      baseUrl = await abortable(deps.resolveHost(opts.host, "login"), signal);
+      baseUrl = await untilAborted(deps.resolveHost(opts.host, "login"), signal);
     } else {
       try {
-        baseUrl = await abortable(deps.resolveHost(undefined, "login"), signal);
+        baseUrl = await untilAborted(deps.resolveHost(undefined, "login"), signal);
       } catch (e) {
         // Asked only when nothing at all names a Galaxy and a person is there to answer. With
         // `--with-token` stdin is for the key, so it cannot also be asked for a URL.
@@ -187,7 +188,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
         reader = lineReader(deps.io.stdin);
         deps.io.stderr.write("Galaxy URL (for example https://usegalaxy.org): ");
         promptOpen = true;
-        const answer = await abortable(reader.next(), signal);
+        const answer = await untilAborted(reader.next(), signal);
         promptOpen = false;
         if (!answer?.trim())
           throw new AuthError("usage", "No Galaxy URL given. Pass --host <url>.");
@@ -201,8 +202,8 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       if (ignored && !sameGalaxy(ignored.url, baseUrl)) {
         err(
           ignored.source === "dotenv"
-            ? `Ignoring GALAXY_URL from .env (${ignored.url}): login only uses --host or GALAXY_URL from the environment.`
-            : `Ignoring galaxy_url from the --profile (${ignored.url}): login only uses --host or GALAXY_URL from the environment.`,
+            ? `Ignoring GALAXY_URL from .env (${safeUrl(ignored.url)}): login only uses --host, --url or GALAXY_URL from the environment.`
+            : `Ignoring galaxy_url from the --profile (${safeUrl(ignored.url)}): login only uses --host, --url or GALAXY_URL from the environment.`,
         );
       }
     }
@@ -211,7 +212,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
 
     // Operations take `GALAXY_API_KEY` before any stored login (config.ts), so the login made here
     // would go unused. gh refuses to log in while `GH_TOKEN` is set; this warns and carries on.
-    if (deps.env.GALAXY_API_KEY) {
+    if (deps.env.GALAXY_API_KEY && !opts.quiet) {
       err(
         "! GALAXY_API_KEY is set and will take precedence over the login stored now. Unset it to use the stored login.",
       );
@@ -250,7 +251,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
         );
       if (/[\r\n]/.test(raw))
         throw new AuthError("usage", "Expected a single-line API key on stdin, got several lines.");
-      const who = await abortable(deps.whoami(baseUrl, raw, signal), signal);
+      const who = await untilAborted(deps.whoami(baseUrl, raw, signal), signal);
       const login: StoredLogin = {
         baseUrl,
         username: who.username,
@@ -284,7 +285,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     // 2b. The device flow.
     let server: AuthServer;
     try {
-      server = await abortable(deps.discover(baseUrl, signal), signal);
+      server = await untilAborted(deps.discover(baseUrl, signal), signal);
     } catch (e) {
       // Discovery says "unsupported" only when there is no usable metadata (404, not JSON), which
       // is what Galaxy 26.1 gives; `noDeviceLogin` points at `--with-token`.
@@ -297,7 +298,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     const scopes = opts.scopes ?? [];
     // A cancel during discovery must not create a code on the server.
     signal.throwIfAborted();
-    const pending = await abortable(
+    const pending = await untilAborted(
       server.startDeviceLogin(scopes.length ? scopes : undefined, signal),
       signal,
     );
@@ -350,7 +351,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     let put: PutResult;
     let expiresAt: string | null;
     try {
-      who = await abortable(deps.whoami(baseUrl, grant.accessToken, signal), signal);
+      who = await untilAborted(deps.whoami(baseUrl, grant.accessToken, signal), signal);
       const now = deps.now();
       expiresAt =
         grant.expiresIn !== undefined

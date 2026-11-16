@@ -1,7 +1,7 @@
 import { withDeadline } from "../abort";
-import { checkExpiry } from "../expiry";
+import { checkExpiry, formatExpiry } from "../expiry";
 import type { AuthDeps, StoredLogin } from "../types";
-import { fail, formatExpiry, hostOf, sanitize } from "./common";
+import { fail, hostOf, sanitize } from "./common";
 
 export interface LogoutOptions {
   host?: string;
@@ -103,10 +103,17 @@ export async function logoutCommand(opts: LogoutOptions, deps: AuthDeps): Promis
     // Local removal is attempted whatever the server said, and its own failure is reported
     // too: a secret that may remain in the keyring is something the person must know.
     let deleteProblem: string | null = null;
+    let removed = false;
     try {
-      await deps.store.delete(baseUrl);
+      removed = await deps.store.delete(baseUrl);
     } catch (e) {
       deleteProblem = sanitize(e instanceof Error ? e.message : String(e), { keepNewlines: true });
+    }
+    // Another logout can remove the entry between the list and here; then there is nothing left
+    // to report as removed.
+    if (!removed && !deleteProblem) {
+      err(`Not logged in to ${host}; nothing to remove.`);
+      return 0;
     }
 
     // The removal line says what happened to the stored login: a tick only when it is gone.
