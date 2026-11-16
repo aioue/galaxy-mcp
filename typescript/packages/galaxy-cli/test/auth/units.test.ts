@@ -2,11 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { abortReason } from "../../src/auth/abort";
 import { configDir } from "../../src/auth/paths";
-import {
-  EXPIRY_MARGIN_MS,
-  checkExpiry,
-  isExpired,
-} from "../../src/auth/expiry";
+import { EXPIRY_MARGIN_MS, checkExpiry, isExpired } from "../../src/auth/expiry";
 import { DAY } from "./harness";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";

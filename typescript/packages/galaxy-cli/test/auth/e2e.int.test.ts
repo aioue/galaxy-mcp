@@ -574,6 +574,24 @@ describe("auth, end to end", () => {
         code: "ENOENT",
       });
     }, 30_000);
+
+    test("login --profile with a name that is not in ~/.planemo.yml exits 64 before anything is sent or stored", async ({
+      galaxy,
+      run,
+      configDir,
+    }) => {
+      const token = galaxy.issueToken();
+      const login = await run(
+        ["--profile", "typo", "auth", "login", "--host", galaxy.baseUrl, "--with-token"],
+        { input: `${token}\n` },
+      );
+      expect(login.exitCode, login.stderr).toBe(64);
+      expect(login.stderr).toContain("Unknown --profile typo: no such profile in ~/.planemo.yml");
+      expect(galaxy.requests).toEqual([]);
+      await expect(readFile(join(configDir, "hosts.yml"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }, 30_000);
   });
 
   // The command tests abort an `AbortController`; only a real process shows that a real SIGINT

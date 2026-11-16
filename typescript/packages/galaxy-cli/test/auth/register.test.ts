@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { Command } from "commander";
 import { createGalaxyContext } from "@galaxyproject/galaxy-ops";
 import { buildProgram } from "../../src/program";
+import { createAuthDeps } from "../../src/auth/deps";
 import { FAKE_TOKEN, HOST, fakeLogin, harness } from "./harness";
 
 const HOST_ARG = "https://dev.galaxy.example.org";
@@ -109,6 +110,45 @@ describe("the auth commands", () => {
       await warned("--quiet", "auth", "login", "--host", "https://g.example", "--with-token"),
     ).not.toContain("--profile");
     expect(await warned("auth", "token")).toBe("");
+  });
+
+  // `login` refuses a --profile that is not in ~/.planemo.yml like every other command, before it
+  // reads the key on stdin, asks Galaxy anything or stores anything. The host rule here is the real
+  // one (`createAuthDeps`), over the harness's fake store, whoami and stdin.
+  it("refuse an unknown --profile for login before the key is read, checked or stored", async () => {
+    const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    process.exitCode = 0;
+    try {
+      const program = buildProgram({
+        invokedAs: "gxy",
+        makeAuthDeps: (name) => ({
+          ...h.deps,
+          resolveHost: createAuthDeps(name, () => program.opts()).resolveHost,
+        }),
+      });
+      await program.parseAsync([
+        "node",
+        "gxy",
+        "--profile",
+        "typo",
+        "auth",
+        "login",
+        "--with-token",
+        "--host",
+        HOST_ARG,
+      ]);
+    } finally {
+      write.mockRestore();
+    }
+    const code = process.exitCode;
+    process.exitCode = 0;
+    expect(code).toBe(64);
+    expect(h.cap.err).toContain("Unknown --profile typo: no such profile in ~/.planemo.yml");
+    expect(h.whoamiCalls).toEqual([]);
+    expect(await h.store.list()).toEqual([]);
+    // The key is still waiting on stdin: nothing read it.
+    expect(h.stdin.read()?.toString()).toBe(`${FAKE_TOKEN}\n`);
   });
 
   // Building the deps opens the credential store. `--help` and the operations

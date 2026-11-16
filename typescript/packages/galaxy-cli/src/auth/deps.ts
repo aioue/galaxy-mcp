@@ -25,8 +25,9 @@ export function createAuthDeps(
     resolveHost: async (explicit, purpose) => {
       const g = globals();
       const src = loadSources();
-      // Login never reads the profile (and warns that it is ignored); the rest do.
-      if (purpose !== "login") requireProfile(g, src);
+      // Every purpose refuses a --profile that does not exist, login included: it never takes its
+      // host from the profile, but a typo there is still a mistake to report, before a key is read.
+      requireProfile(g, src);
       return resolveHost({
         explicit: explicit ?? g.url,
         env,

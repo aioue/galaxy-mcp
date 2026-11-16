@@ -292,7 +292,9 @@ describe("network and TLS failures", () => {
         }),
       });
     }) as unknown as typeof fetch;
-    const e = await authErrorOf(probeGalaxy("https://ssl-galaxy.example.org" as BaseUrl, dnsFailure));
+    const e = await authErrorOf(
+      probeGalaxy("https://ssl-galaxy.example.org" as BaseUrl, dnsFailure),
+    );
     expect(e.kind).toBe("network");
     expect(e.message).toContain("Could not reach");
     expect(e.message).not.toContain("secure connection");
