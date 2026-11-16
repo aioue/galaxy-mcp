@@ -76,7 +76,7 @@ describe("naming the Galaxy", () => {
   it("strips terminal escapes from an ignored value that is not a URL", async () => {
     const h = withKey({
       hostFromEnv: HOST_ARG,
-      ignoredLoginHost: { source: "profile", url: "evil\x1b[2J\x07 host" + "x".repeat(500) },
+      ignoredLoginHost: { source: "dotenv", url: "evil\x1b[2J\x07 host" + "x".repeat(500) },
     });
     await loginCommand({ withToken: true }, h.deps);
     expect(h.cap.err).not.toMatch(/[\x00-\x09\x0b-\x1f\x7f]/);
