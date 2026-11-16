@@ -110,7 +110,15 @@ describe("the auth commands", () => {
         }),
       });
       await program.parseAsync([
-        "node", "gxy", "--profile", "typo", "auth", "login", "--with-token", "--host", HOST_ARG,
+        "node",
+        "gxy",
+        "--profile",
+        "typo",
+        "auth",
+        "login",
+        "--with-token",
+        "--host",
+        HOST_ARG,
       ]);
     } finally {
       write.mockRestore();
