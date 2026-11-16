@@ -175,7 +175,7 @@ describe("the auth commands", () => {
     ["logout", ["auth", "logout"], "Unknown --profile"],
     ["env", ["auth", "env"], "Unknown --profile"],
     ["headers", ["auth", "headers"], "Unknown --profile"],
-  ])("refuse an unknown --profile for auth %s with exit 64", async (cmd, argv, message) => {
+  ])("refuse an unknown --profile for auth %s with exit 64", async (_cmd, argv, message) => {
     const h = harness({ stored: [fakeLogin()], stdinText: `${FAKE_TOKEN}\n` });
     const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     process.exitCode = 0;
@@ -203,7 +203,7 @@ describe("the auth commands", () => {
     expect(h.cap.out).toBe("");
     expect(h.whoamiCalls).toEqual([]);
     expect(await h.store.list()).toHaveLength(1); // still only the seeded login
-    if (cmd === "login") expect(h.stdin.readableLength).toBeGreaterThan(0);
+    expect(h.stdin.readableLength).toBeGreaterThan(0); // the key on stdin was never read
   });
 
   // Building the deps opens the credential store, and with it the keyring. `--help` and the operations
