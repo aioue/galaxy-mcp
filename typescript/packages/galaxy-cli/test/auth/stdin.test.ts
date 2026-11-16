@@ -164,16 +164,19 @@ describe("readSecret", () => {
     expect(raw.at(-1)).toBe(false);
   });
 
-  it.each(["end", "close"] as const)("settles with what was typed when stdin emits %s", async (ev) => {
-    const { s, raw, stdin } = terminal();
-    const p = readSecret(stdin, signal());
-    s.write("fake-key");
-    await new Promise((r) => setImmediate(r));
-    s.emit(ev);
-    await expect(p).resolves.toBe("fake-key");
-    expect(raw.at(-1)).toBe(false);
-    expect(s.listenerCount("data") + s.listenerCount("end") + s.listenerCount("error")).toBe(0);
-  });
+  it.each(["end", "close"] as const)(
+    "settles with what was typed when stdin emits %s",
+    async (ev) => {
+      const { s, raw, stdin } = terminal();
+      const p = readSecret(stdin, signal());
+      s.write("fake-key");
+      await new Promise((r) => setImmediate(r));
+      s.emit(ev);
+      await expect(p).resolves.toBe("fake-key");
+      expect(raw.at(-1)).toBe(false);
+      expect(s.listenerCount("data") + s.listenerCount("end") + s.listenerCount("error")).toBe(0);
+    },
+  );
 
   it("rejects on a stream error, and cleanup survives setRawMode throwing", async () => {
     const { s, stdin } = terminal();
