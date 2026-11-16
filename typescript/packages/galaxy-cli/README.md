@@ -101,6 +101,11 @@ pair, so its key goes to its own Galaxy), then `GALAXY_URL` in the environment, 
 `.env`, then the only stored login. Before stored logins existed, `GALAXY_URL` and the `.env` URL
 beat the profile's.
 
+A `--profile` name that is not in `~/.planemo.yml` (a typo, or a file that cannot be read) is an
+error (exit 64), not a profile with nothing in it: it never falls back to a stored login, which
+could be for a different Galaxy than the one you named. `gxy auth` commands other than `login`
+(which ignores `--profile`) refuse it too.
+
 A key that is not the stored login's is only ever sent to a Galaxy that something named, never to
 the only stored login by default: with a key and no Galaxy named, `gxy` stops with "No Galaxy
 credentials" and asks for the Galaxy. A profile's key goes to its own URL, or to the Galaxy you
