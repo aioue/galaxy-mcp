@@ -2,7 +2,8 @@ import { normalizeBaseUrl } from "../base-url";
 import { InputCancelled, isRawCapable, readPiped, readSecret } from "../stdin";
 import { AuthError, type AuthDeps, type BaseUrl, type StoredLogin, type WhoAmI } from "../types";
 import { fail, hostOf, sanitize } from "./common";
-import { abortReason } from "../abort";
+import { show } from "../file-store";
+import { untilAborted } from "../abort";
 
 export interface LoginOptions {
   host?: string;
@@ -10,6 +11,8 @@ export interface LoginOptions {
   insecureStorage?: boolean;
   /** Aborted on Ctrl-C by the caller (commands don't touch process signals). */
   signal?: AbortSignal;
+  /** The global `--quiet`: drops this command's own warnings, for a wrapper that fails on stderr output. */
+  quiet?: boolean;
 }
 
 /** Same Galaxy, however the URL was written; an unparsable one never matches. */
@@ -21,25 +24,22 @@ function sameGalaxy(a: string, b: string): boolean {
   }
 }
 
+/**
+ * An ignored URL as it is safe to print: scheme, host and path only, so no `user:password@`, query
+ * or fragment, and no control characters, since `.env` and a profile come from a directory or
+ * file the person may not have written. Text that is not a URL is shown cleaned and cut short.
+ */
+function safeUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return show(`${u.protocol}//${hostOf(raw)}`);
+  } catch {
+    return show(raw);
+  }
+}
+
 /** 128 + SIGINT, which is what a shell reports for a process that Ctrl-C ended. */
 const EX_INTERRUPTED = 130;
-
-/** Settle with `p`, or reject as soon as `signal` aborts (the work behind `p` is left to finish on its own). */
-function abortable<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) {
-    p.catch(() => undefined);
-    return Promise.reject(abortReason(signal));
-  }
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    p.then(resolve, reject).finally(() => {
-      signal.removeEventListener("abort", onAbort);
-    });
-  });
-}
 
 /** Printed before the token is stored, so it shows even when storing is refused. */
 function adminWarning(host: string, who: WhoAmI): string | undefined {
@@ -79,7 +79,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
           `\`printf %s "$KEY" | ${deps.commandName} auth login --host <url> --with-token\``,
       );
     // 1. Which Galaxy.
-    const baseUrl: BaseUrl = await abortable(deps.resolveHost(opts.host, "login"), signal);
+    const baseUrl: BaseUrl = await untilAborted(deps.resolveHost(opts.host, "login"), signal);
     const host = hostOf(baseUrl);
     // Login never takes its host from `.env` or a profile (see pickHost); say so when one disagrees.
     if (!opts.host) {
@@ -87,8 +87,8 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       if (ignored && !sameGalaxy(ignored.url, baseUrl)) {
         err(
           ignored.source === "dotenv"
-            ? `Ignoring GALAXY_URL from .env (${ignored.url}): login only uses --host or GALAXY_URL from the environment.`
-            : `Ignoring galaxy_url from the --profile (${ignored.url}): login only uses --host or GALAXY_URL from the environment.`,
+            ? `Ignoring GALAXY_URL from .env (${safeUrl(ignored.url)}): login only uses --host, --url or GALAXY_URL from the environment.`
+            : `Ignoring galaxy_url from the --profile (${safeUrl(ignored.url)}): login only uses --host, --url or GALAXY_URL from the environment.`,
         );
       }
     }
@@ -97,7 +97,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
 
     // Operations take `GALAXY_API_KEY` before any stored login (config.ts), so the login made here
     // would go unused. gh refuses to log in while `GH_TOKEN` is set; this warns and carries on.
-    if (deps.env.GALAXY_API_KEY) {
+    if (deps.env.GALAXY_API_KEY && !opts.quiet) {
       err(
         "! GALAXY_API_KEY is set and will take precedence over the login stored now. Unset it to use the stored login.",
       );
@@ -135,7 +135,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       );
     if (/[\r\n]/.test(raw))
       throw new AuthError("usage", "Expected a single-line API key on stdin, got several lines.");
-    const who = await abortable(deps.whoami(baseUrl, raw, signal), signal);
+    const who = await untilAborted(deps.whoami(baseUrl, raw, signal), signal);
     const login: StoredLogin = {
       baseUrl,
       username: who.username,

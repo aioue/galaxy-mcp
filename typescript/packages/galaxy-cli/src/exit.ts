@@ -38,13 +38,17 @@ const AUTH_MAP: Record<AuthErrorKind, number> = {
   // As `connection` for an operation: no answer from the Galaxy.
   network: EX_UNAVAILABLE,
   // As `version`: a Galaxy that cannot be used for login as it is. `unsupported` is one with no
-  // device flow; `insecure` is one that cannot be reached safely: plain http to a host that is not
-  // this machine, which is refused before anything is sent, or an issuer or endpoints that are not
-  // itself. That is 76 and not 64 even for a typed `--host http://...`: it is the Galaxy's address
-  // that is refused, whoever wrote it, and one code covers it wherever the address came from.
+  // device flow or no revocation endpoint; `insecure` is one that cannot be reached safely: plain
+  // http to a host that is not this machine, which is refused before anything is sent, or an
+  // issuer or endpoints that are not itself. That is 76 and not 64 even for a typed
+  // `--host http://...`: it is the Galaxy's address that is refused, whoever wrote it, and one
+  // code covers it wherever the address came from.
   unsupported: EX_PROTOCOL,
   protocol: EX_PROTOCOL,
   insecure: EX_PROTOCOL,
+  // A keyring that will not confirm a removal. `logout` catches it, reports it itself and exits
+  // 1 (the command ran, but not everything was removed), so this is the same 1 for any other caller.
+  leftover: 1,
   // As `auth` for an operation: there is no credential Galaxy would take, whether none is stored,
   // it ran out, an admin key may not go in the plaintext file, or the person said no on the
   // approval page.
@@ -59,5 +63,5 @@ const AUTH_MAP: Record<AuthErrorKind, number> = {
 };
 
 export function exitCodeForAuthError(kind: AuthErrorKind): number {
-  return AUTH_MAP[kind] ?? EX_SOFTWARE;
+  return AUTH_MAP[kind];
 }

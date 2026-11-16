@@ -102,7 +102,10 @@ record (it says the secret may remain in the keyring, and exits 1) and `auth sta
 reports that host as "token unavailable" and exits 1. Logging in again over a login that is in the
 keyring, when `gxy` cannot use the keyring to remove the old secret (`GXY_NO_KEYRING`, or a keyring
 that does not answer), stores the new login and warns that the old secret may remain, naming the
-entry (`gxy:<url>`) to remove with your keyring's own tool.
+entry (`gxy:<url>`) to remove with your keyring's own tool. `auth logout` names the entry the same
+way when the keyring could not confirm the removal. A login over one that is in the keyring puts the
+old secret back if it fails or is cancelled; if it cannot, it says the earlier login may no longer
+work and that logging in again will fix it.
 
 ### Which key and which Galaxy an operation uses
 
@@ -117,6 +120,12 @@ The Galaxy: `--url`, then the `--profile` URL (when the profile has a `galaxy_ur
 pair, so its key goes to its own Galaxy), then `GALAXY_URL` in the environment, then `GALAXY_URL` in
 `.env`, then the only stored login. Before stored logins existed, `GALAXY_URL` and the `.env` URL
 beat the profile's.
+
+A `--profile` name that is not in `~/.planemo.yml` (a typo, or a file that cannot be read) is an
+error (exit 64), not a profile with nothing in it: it never falls back to a stored login, which
+could be for a different Galaxy than the one you named. The `gxy auth` commands other than `login`
+refuse it too. `login` ignores `--profile` altogether (it warns so) and logs in whether or not the
+profile exists.
 
 A key that is not the stored login's is only ever sent to a Galaxy that something named, never to
 the only stored login by default: with a key and no Galaxy named, `gxy` stops with "No Galaxy
