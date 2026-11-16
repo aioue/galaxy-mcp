@@ -35,6 +35,10 @@ export function createAuthDeps(
         store,
       });
     },
+    // The same refusal `resolveHost` makes, for `status`, which lists logins without resolving a host.
+    checkProfile: () => {
+      requireProfile(globals(), loadSources());
+    },
     // What an operation would use for this Galaxy, by the one order in config.ts. The global
     // `--url`, `--api-key` and `--profile` count: they are what `gxy <operation>` would be given.
     keySourceFor: (baseUrl, login, stored) => {

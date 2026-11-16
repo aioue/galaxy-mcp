@@ -50,6 +50,8 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
     deps.io.stderr.write(`${s}\n`);
   };
   try {
+    // Before anything is listed or checked: an unknown `--profile` is refused with or without `--host`.
+    deps.checkProfile?.();
     let summaries = await deps.store.list();
     // Every stored Galaxy, before `--host` narrows the list: with several, an operation that names
     // none is ambiguous, whichever one is being shown.

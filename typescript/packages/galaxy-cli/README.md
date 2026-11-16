@@ -108,7 +108,7 @@ beat the profile's.
 A `--profile` name that is not in `~/.planemo.yml` (a typo, or a file that cannot be read) is an
 error (exit 64), not a profile with nothing in it: it never falls back to a stored login, which
 could be for a different Galaxy than the one you named. The `gxy auth` commands other than `login`
-refuse it too. `login` refuses `--profile` altogether, for any name, whether or not the profile
+(`status` included, with or without `--host`) refuse it too. `login` refuses `--profile` altogether, for any name, whether or not the profile
 exists.
 
 A key that is not the stored login's is only ever sent to a Galaxy that something named, never to
