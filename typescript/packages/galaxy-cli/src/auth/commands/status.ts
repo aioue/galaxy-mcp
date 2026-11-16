@@ -109,6 +109,9 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
       } catch (e) {
         // Ctrl-C while the keyring was being read ends the helper, and that is not "unavailable".
         if (opts.signal?.aborted) return undefined;
+        // The file itself cannot be used (it changed since the list, or an entry a newer gxy wrote):
+        // that is the store's problem, and logging in again would meet the same refusal.
+        if (e instanceof AuthError && e.kind === "store") throw e;
         unreadable = e instanceof Error ? e.message : String(e);
       }
       if (!login) {
