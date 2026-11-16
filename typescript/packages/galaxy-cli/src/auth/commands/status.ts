@@ -8,7 +8,7 @@ import {
   type StoredLogin,
 } from "../types";
 import { fail, formatTimeLeft, hostOf, maskToken, sanitize } from "./common";
-import { abortReason } from "../abort";
+import { untilAborted } from "../abort";
 
 export interface StatusOptions {
   host?: string;
@@ -23,23 +23,6 @@ export interface StatusOptions {
 const CHECK_TIMEOUT_MS = 10_000;
 /** 128 + SIGINT, which is what a shell reports for a process that Ctrl-C ended. */
 const EX_INTERRUPTED = 130;
-
-/** Settle with `p`, or reject as soon as `signal` aborts (the work behind `p` is left to end on its own). */
-function abortable<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    if (signal.aborted) {
-      reject(abortReason(signal));
-      return;
-    }
-    const onAbort = () => {
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    p.then(resolve, reject).finally(() => {
-      signal.removeEventListener("abort", onAbort);
-    });
-  });
-}
 
 type State = "ok" | "expired" | "invalid" | "error";
 
@@ -114,7 +97,7 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
       const timeout = AbortSignal.timeout(timeoutMs);
       const signal = AbortSignal.any([...(opts.signal ? [opts.signal] : []), stop.signal, timeout]);
       try {
-        const who = await abortable(deps.whoami(login.baseUrl, login.token, signal), signal);
+        const who = await untilAborted(deps.whoami(login.baseUrl, login.token, signal), signal);
         return {
           login,
           state: "ok",
