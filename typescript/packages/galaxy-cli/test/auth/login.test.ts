@@ -590,6 +590,8 @@ describe("cancelling with Ctrl-C", () => {
     });
     ac.abort();
     expectCancelled(h, await p);
+    // The prompt has no newline of its own, so "Cancelled." must not share its line.
+    expect(h.cap.err).toMatch(/Galaxy URL \(for example https:\/\/usegalaxy\.org\): \nCancelled\./);
   });
 
   // The keyring write is the one step that can last (an unlock prompt), and Ctrl-C kills its helper.

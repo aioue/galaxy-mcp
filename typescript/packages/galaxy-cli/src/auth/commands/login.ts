@@ -165,6 +165,8 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
   let reader: ReturnType<typeof lineReader> | undefined;
   // Set when the revocation after a cancel has already printed "Cancelled".
   const said = { cancelled: false };
+  // True while the "Galaxy URL" prompt is on screen without its newline.
+  let promptOpen = false;
   try {
     // 1. Which Galaxy.
     let baseUrl: BaseUrl;
@@ -184,7 +186,9 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
           throw e;
         reader = lineReader(deps.io.stdin);
         deps.io.stderr.write("Galaxy URL (for example https://usegalaxy.org): ");
+        promptOpen = true;
         const answer = await abortable(reader.next(), signal);
+        promptOpen = false;
         if (!answer?.trim())
           throw new AuthError("usage", "No Galaxy URL given. Pass --host <url>.");
         baseUrl = normalizeBaseUrl(answer);
@@ -391,6 +395,8 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     // A Ctrl-C at the key prompt arrives as a character in raw mode, not as SIGINT, hence
     // `InputCancelled`; either way it is 130 and not a failure message.
     if (signal.aborted || e instanceof InputCancelled) {
+      // The prompt has no newline, so "Cancelled." would join its line.
+      if (promptOpen) deps.io.stderr.write("\n");
       if (!said.cancelled) err("Cancelled.");
       return EX_INTERRUPTED;
     }
