@@ -112,13 +112,14 @@ describe("the auth commands", () => {
     expect(await warned("auth", "token")).toBe("");
   });
 
-  // `login` refuses a --profile that is not in ~/.planemo.yml like every other command, before it
-  // reads the key on stdin, asks Galaxy anything or stores anything. The host rule here is the real
-  // one (`createAuthDeps`), over the harness's fake store, whoami and stdin.
-  it("refuse an unknown --profile for login before the key is read, checked or stored", async () => {
+  // `login` never uses the profile, so a --profile that is not in ~/.planemo.yml changes nothing: it
+  // warns that the profile is ignored, then logs in. The host rule here is the real one
+  // (`createAuthDeps`), over the harness's fake store, whoami and stdin.
+  it("log in despite an unknown --profile, which login only warns is ignored", async () => {
     const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
     const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     process.exitCode = 0;
+    let printed = "";
     try {
       const program = buildProgram({
         invokedAs: "gxy",
@@ -138,17 +139,17 @@ describe("the auth commands", () => {
         "--host",
         HOST_ARG,
       ]);
+      printed = write.mock.calls.map((c) => String(c[0])).join("");
     } finally {
       write.mockRestore();
     }
     const code = process.exitCode;
     process.exitCode = 0;
-    expect(code).toBe(64);
-    expect(h.cap.err).toContain("Unknown --profile typo: no such profile in ~/.planemo.yml");
-    expect(h.whoamiCalls).toEqual([]);
-    expect(await h.store.list()).toEqual([]);
-    // The key is still waiting on stdin: nothing read it.
-    expect(h.stdin.read()?.toString()).toBe(`${FAKE_TOKEN}\n`);
+    expect(code).toBe(0);
+    expect(printed).toContain("Warning: --profile is ignored by `gxy auth login`");
+    expect(printed).not.toContain("Unknown --profile");
+    expect(h.cap.err).not.toContain("Unknown --profile");
+    expect(await h.store.list()).toHaveLength(1);
   });
 
   // Building the deps opens the credential store, and with it the keyring. `--help` and the operations
