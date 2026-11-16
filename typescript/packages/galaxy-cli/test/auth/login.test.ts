@@ -274,7 +274,7 @@ describe("login (device flow)", () => {
     it("strips terminal escapes from an ignored value that is not a URL", async () => {
       const h = harness({
         hostFromEnv: HOST_ARG,
-        ignoredLoginHost: { source: "profile", url: "evil\x1b[2J\x07 host" + "x".repeat(500) },
+        ignoredLoginHost: { source: "dotenv", url: "evil\x1b[2J\x07 host" + "x".repeat(500) },
       });
       await loginCommand({}, h.deps);
       // eslint-disable-next-line no-control-regex
