@@ -81,14 +81,12 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     // 1. Which Galaxy.
     const baseUrl: BaseUrl = await untilAborted(deps.resolveHost(opts.host, "login"), signal);
     const host = hostOf(baseUrl);
-    // Login never takes its host from `.env` or a profile (see pickHost); say so when one disagrees.
+    // Login never takes its host from `.env` (see pickHost); say so when it disagrees.
     if (!opts.host) {
       const ignored = deps.ignoredLoginHost?.();
       if (ignored && !sameGalaxy(ignored.url, baseUrl)) {
         err(
-          ignored.source === "dotenv"
-            ? `Ignoring GALAXY_URL from .env (${safeUrl(ignored.url)}): login only uses --host, --url or GALAXY_URL from the environment.`
-            : `Ignoring galaxy_url from the --profile (${safeUrl(ignored.url)}): login only uses --host, --url or GALAXY_URL from the environment.`,
+          `Ignoring GALAXY_URL from .env (${safeUrl(ignored.url)}): login only uses --host, --url or GALAXY_URL from the environment.`,
         );
       }
     }
