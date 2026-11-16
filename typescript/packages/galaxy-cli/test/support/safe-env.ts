@@ -24,7 +24,7 @@ process.env.XDG_CONFIG_HOME = join(home, "xdg");
 process.env.GXY_CONFIG_DIR = join(home, "gxy");
 
 // Everything under src/ that reads the environment, so a developer's own values cannot change a result.
-// The live values were saved by global-setup.ts for the opt-in smoke test.
+// global-setup.ts passes the live values to the opt-in smoke test through `provide`.
 for (const name of ["GALAXY_URL", "GALAXY_API_KEY", "CLAUDE_CODE_MCP_SERVER_URL", ...LEAKY_ENV]) {
   Reflect.deleteProperty(process.env, name);
 }

@@ -73,6 +73,18 @@ describe("the auth commands", () => {
     }
   });
 
+  // The login warning that a GALAXY_API_KEY outranks the stored login is the command's own, so
+  // `--quiet` has to reach the command, as it does for the warnings above.
+  it("drop login's GALAXY_API_KEY precedence warning with --quiet", async () => {
+    const login = async (...global: string[]) => {
+      const h = harness({ env: { GALAXY_API_KEY: "irrelevant" }, stdinText: `${FAKE_TOKEN}\n` });
+      await run([...global, "auth", "login", "--with-token", "--host", HOST_ARG], h);
+      return h.cap.err;
+    };
+    expect(await login()).toContain("GALAXY_API_KEY is set and will take precedence");
+    expect(await login("--quiet")).not.toContain("GALAXY_API_KEY is set");
+  });
+
   // A login never takes its host from a profile, so `--profile` does nothing there; the other
   // subcommands do use it (host, and which key `status` reports), so they stay quiet.
   it("warn once that the global --profile is ignored by login only, and not with --quiet", async () => {
