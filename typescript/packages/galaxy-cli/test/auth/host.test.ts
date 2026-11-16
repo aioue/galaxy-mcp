@@ -223,7 +223,7 @@ describe("operations and auth pick the same Galaxy", () => {
   }
 
   // An unknown profile is refused by both, rather than quietly falling back to the stored login.
-  it("both refuse an unknown --profile", async () => {
+  it("every purpose refuses an unknown --profile", async () => {
     const flags = { profile: "typo" };
     await expect(loadSourcesAsync(flags)).rejects.toMatchObject({ kind: "usage" });
     const deps = createAuthDeps("gxy", () => flags);
@@ -231,7 +231,16 @@ describe("operations and auth pick the same Galaxy", () => {
       kind: "usage",
       message: "Unknown --profile typo: no such profile in ~/.planemo.yml",
     });
-    // Login does not use the profile (it warns that it is ignored), so it is not refused there.
-    expect(await deps.resolveHost(undefined, "login")).toBe(A);
+    // Login ignores the profile for the host, but a profile that does not exist is refused there too.
+    await expect(deps.resolveHost(undefined, "login")).rejects.toMatchObject({
+      kind: "usage",
+      message: "Unknown --profile typo: no such profile in ~/.planemo.yml",
+    });
+    await expect(deps.resolveHost("https://a.example", "login")).rejects.toMatchObject({
+      kind: "usage",
+    });
+    // A profile that exists is still ignored by login, which takes the stored login here.
+    const known = createAuthDeps("gxy", () => ({ profile: "p" }));
+    expect(await known.resolveHost(undefined, "login")).toBe(A);
   });
 });
