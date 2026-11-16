@@ -5,6 +5,9 @@ import { buildProgram } from "../../src/program";
 import { FAKE_TOKEN, HOST, fakeLogin, harness } from "./harness";
 
 const HOST_ARG = "https://dev.galaxy.example.org";
+const loginArgv = ["auth", "login", "--host", HOST_ARG, "--with-token"];
+/** A harness whose stdin holds the key `login --with-token` reads. */
+const loggingIn = () => harness({ stdinText: `${FAKE_TOKEN}\n` });
 
 async function run(argv: string[], h = harness({ stored: [fakeLogin()] })) {
   process.exitCode = 0;
@@ -38,47 +41,88 @@ describe("the auth commands", () => {
     expect(code).toBe(0);
   });
 
-  // The global `--api-key` is for the operations. `auth` never reads it, and saying so is better than
-  // letting someone think a key they typed was used.
-  it("warn once that the global --api-key is ignored, and not with --quiet", async () => {
-    const warned = async (...argv: string[]) => {
+  // A flag that does not apply is a usage error, not a warning: with `--profile prod --with-token`
+  // the key on stdin would otherwise go to a Galaxy other than prod's before anyone could react.
+  // The refusal comes before deps are built, stdin is read, anything is sent or stored.
+  describe("refuse a global flag that does not apply to login", () => {
+    const refusal = async (argv: string[]) => {
       const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
       try {
-        await run(["--api-key", "fake-flag-key", ...argv, "auth", "token"]);
-        return write.mock.calls.map((c) => String(c[0])).join("");
+        const result = await run(argv, loggingIn());
+        return { ...result, text: write.mock.calls.map((c) => String(c[0])).join("") };
       } finally {
         write.mockRestore();
       }
     };
-    const text = await warned();
-    expect(text).toBe("Warning: --api-key is ignored by `gxy auth` commands.\n");
-    expect(await warned("--quiet")).toBe("");
+    const PROFILE_MSG =
+      "--profile does not apply to `gxy auth login`: login takes its Galaxy from --host, --url or GALAXY_URL in the environment.\n";
+    const KEY_MSG =
+      "--api-key does not apply to `gxy auth login`: pipe the key in with --with-token instead.\n";
+
+    it.each([
+      ["a profile that exists or not", ["--profile", "p"], PROFILE_MSG],
+      ["an --api-key", ["--api-key", "fake-flag-key"], KEY_MSG],
+      ["an empty --profile", ["--profile", ""], PROFILE_MSG],
+      ["an empty --api-key", ["--api-key", ""], KEY_MSG],
+    ])("%s: exit 64, nothing read, asked, sent or stored", async (_what, flags, message) => {
+      for (const quiet of [[], ["--quiet"]]) {
+        const { h, code, makeAuthDeps, text } = await refusal([...quiet, ...flags, ...loginArgv]);
+        expect(code).toBe(64);
+        expect(text).toBe(message);
+        expect(makeAuthDeps).not.toHaveBeenCalled();
+        expect(h.whoamiCalls).toEqual([]);
+        expect(h.store.logins.size).toBe(0);
+        expect(h.stdin.readableLength).toBeGreaterThan(0); // the key is still waiting on stdin
+        expect(h.cap.out + h.cap.err).toBe("");
+      }
+    });
+
+    it("say both when both flags are given", async () => {
+      const { code, text } = await refusal(["--profile", "p", "--api-key", "K", ...loginArgv]);
+      expect(code).toBe(64);
+      expect(text).toBe(PROFILE_MSG + KEY_MSG);
+    });
+
+    it("do not stop login without them, and --quiet alone says nothing", async () => {
+      const { h, code, text } = await refusal(["--quiet", ...loginArgv]);
+      expect(code).toBe(0);
+      expect(text).toBe("");
+      expect(h.store.logins.has(HOST)).toBe(true);
+    });
   });
 
-  // A login never takes its host from a profile, so `--profile` does nothing there; the other
-  // subcommands do use it (to find the host), so they stay quiet.
-  it("warn once that the global --profile is ignored by login only, and not with --quiet", async () => {
-    const warned = async (...argv: string[]) => {
-      const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-      try {
-        await run(
-          ["--profile", "p", ...argv],
-          harness({ stored: [fakeLogin()], stdinText: `${FAKE_TOKEN}\n` }),
-        );
-        return write.mock.calls.map((c) => String(c[0])).join("");
-      } finally {
-        write.mockRestore();
-      }
-    };
-    const warning =
-      "Warning: --profile is ignored by `gxy auth login`: it only uses --host or GALAXY_URL from the environment.\n";
-    expect(await warned("auth", "login", "--host", "https://g.example", "--with-token")).toContain(
-      warning,
+  // The other auth commands: `--profile` finds their host (an unknown name is refused by
+  // `requireProfile`, not here), and `--api-key` is ignored by all of them, so it is refused too.
+  describe("refuse --api-key for the commands that never use it", () => {
+    it.each([["token"], ["logout"]])(
+      "auth %s: exit 64, nothing run, even with --quiet",
+      async (cmd) => {
+        const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        try {
+          for (const quiet of [[], ["--quiet"]]) {
+            write.mockClear();
+            const { h, code, makeAuthDeps } = await run([...quiet, "--api-key", "K", "auth", cmd]);
+            expect(code).toBe(64);
+            expect(write.mock.calls.map((c) => String(c[0])).join("")).toBe(
+              `--api-key does not apply to \`gxy auth ${cmd}\`.\n`,
+            );
+            expect(makeAuthDeps).not.toHaveBeenCalled();
+            expect(h.cap.out).toBe("");
+            expect(h.store.logins.size).toBe(1); // the stored login is still there
+          }
+        } finally {
+          write.mockRestore();
+        }
+      },
     );
-    expect(
-      await warned("--quiet", "auth", "login", "--host", "https://g.example", "--with-token"),
-    ).not.toContain("--profile");
-    expect(await warned("auth", "token")).toBe("");
+
+    it("leave --profile to token and logout, which use it to find the host", async () => {
+      for (const cmd of ["token", "logout"]) {
+        const { code, makeAuthDeps } = await run(["--profile", "p", "auth", cmd]);
+        expect(code).toBe(0);
+        expect(makeAuthDeps).toHaveBeenCalled();
+      }
+    });
   });
 
   // Building the deps opens the credential store. `--help` and the operations
@@ -119,11 +163,8 @@ describe("the auth commands", () => {
 
 describe("options", () => {
   it("--with-token and --insecure-storage reach login", async () => {
-    const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
-    const { code } = await run(
-      ["auth", "login", "--host", HOST_ARG, "--with-token", "--insecure-storage"],
-      h,
-    );
+    const h = loggingIn();
+    const { code } = await run([...loginArgv, "--insecure-storage"], h);
     expect(code).toBe(0);
     expect(h.store.logins.get(HOST)).toMatchObject({ method: "pasted", storage: "file" });
   });

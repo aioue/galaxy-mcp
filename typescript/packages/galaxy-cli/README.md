@@ -85,10 +85,13 @@ again, and that meets the same refusal), names the file and what to do, and chan
 
 `auth token` and `auth logout` pick their Galaxy by `--host` (the same as `--url`), then the
 `--profile` URL, then `GALAXY_URL` in the environment, then `GALAXY_URL` in `.env`, then the only
-stored login. They never use a key from `--api-key`, `GALAXY_API_KEY`, `.env` or a profile, and warn
-once on stderr if `--api-key` is given (and, for `auth login` only, `--profile`). `auth login` never
-takes its host from `.env` or a profile (a repository must not choose where your key goes): give
-`--host` or set `GALAXY_URL`.
+stored login. They never use a key from `--api-key`, `GALAXY_API_KEY`, `.env` or a profile, so they
+refuse `--api-key` with a usage error (exit 64, even with `--quiet`) before they do anything.
+`auth login` picks its Galaxy by `--host`, then `GALAXY_URL` in the environment, then the only stored
+login. It never takes its host from `.env` or a profile (a repository must not choose where your key
+goes): give `--host` or set `GALAXY_URL`. `--profile` and `--api-key` do not apply to it, so it
+refuses either one with the same usage error before it reads stdin, asks or sends anything: pipe the
+key in with `--with-token`.
 
 ### What is checked before a key is sent
 
