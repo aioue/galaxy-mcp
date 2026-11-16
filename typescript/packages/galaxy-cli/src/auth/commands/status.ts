@@ -143,16 +143,29 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
     };
     // All at once, so N unreachable Galaxies cost one timeout and not N; `checked` keeps the order
     // of `summaries`, which is the order the report is printed in.
-/** `unavailable`: the record is there but its token cannot be read (keyring down, secret gone). */
-type State = "ok" | "expired" | "invalid" | "error" | "unavailable";
+    let results: (Checked | undefined)[];
+    try {
+      results = await Promise.all(summaries.map((summary) => check(summary)));
+    } catch (e) {
+      stop.abort();
+      throw e;
+    }
+    if (results.includes(undefined)) {
+      err("Cancelled.");
+      return EX_INTERRUPTED;
+    }
     const checked = results as Checked[];
     // What an operation run now would use for each Galaxy: a login on the list is not always the key
     // in use (config.ts ranks `--api-key`, `--profile` and `GALAXY_API_KEY` above it, `.env` below),
     // and the flags or environment may send operations to another Galaxy altogether, in which case
     // no source is named for this one.
     const rows = checked.map((c) => {
-/** `unavailable`: the record is there but its token cannot be read (keyring down, secret gone). */
-type State = "ok" | "expired" | "invalid" | "error" | "unavailable";
+      const { token } = c.login;
+      const key: { id: KeySourceId | null; label: string } = deps.keySourceFor(
+        c.login.baseUrl,
+        token === undefined ? undefined : { ...c.login, token },
+        stored,
+      );
       return { c, key };
     });
 

@@ -287,10 +287,11 @@ describe("auth status", () => {
       h.store.get = async (baseUrl) => {
         if (baseUrl !== OTHER) return get(baseUrl);
         await hasAsked;
-        return null;
+        // A store error is what ends the command (an unreadable token is only that host's).
+        throw new AuthError("store", "hosts.yml changed and cannot be used.");
       };
-      expect(await statusCommand({ timeoutMs: 60_000 }, h.deps)).toBe(77);
-      expect(h.cap.err).toContain("was removed while this ran");
+      expect(await statusCommand({ timeoutMs: 60_000 }, h.deps)).toBe(65);
+      expect(h.cap.err).toContain("hosts.yml changed and cannot be used.");
       expect(signal?.aborted).toBe(true);
     });
 
