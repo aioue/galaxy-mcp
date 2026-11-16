@@ -235,8 +235,8 @@ export interface AuthDeps {
   ): { id: KeySourceId | null; label: string };
   /** Open a URL in the user's browser. Resolves false when there is no browser to open. */
   openBrowser(url: string): Promise<boolean>;
-  /** Whether `openBrowser` has any chance (a display exists). Absent means "assume yes". */
-  canOpenBrowser?(): boolean;
+  /** Whether `openBrowser` has any chance (a display exists). */
+  canOpenBrowser(): boolean;
   now(): Date;
   env: Record<string, string | undefined>;
   io: AuthIo;

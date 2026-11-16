@@ -302,8 +302,9 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
       signal,
     );
 
-    // `startDeviceLogin` checks this too; this is for any other `AuthServer`. The normalised URL is
-    // what is printed and opened: the raw string can hold a tab or newline that parsing drops.
+    // `startDeviceLogin` checks this too; this is defence in depth, for any other `AuthServer`.
+    // The normalised URL is what is printed and opened: the raw string can hold a tab or newline
+    // that parsing drops.
     const verificationUri = trustedVerificationUri(pending.verificationUri, baseUrl);
     if (verificationUri === undefined) {
       throw new AuthError(
@@ -327,7 +328,7 @@ export async function loginCommand(opts: LoginOptions, deps: AuthDeps): Promise<
     // As `gh auth login` does: offer on a terminal and wait for Enter, and print the URL and nothing
     // more when not interactive, so a script or an agent never has a browser opened for it.
     const canOpen =
-      opts.browser !== false && deps.io.interactive && (deps.canOpenBrowser?.() ?? true);
+      opts.browser !== false && deps.io.interactive && deps.canOpenBrowser();
     if (canOpen) {
       err("Press Enter to open that page in your browser…");
       reader ??= lineReader(deps.io.stdin);
