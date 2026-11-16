@@ -203,6 +203,40 @@ describe("the auth commands", () => {
     if (cmd === "login") expect(h.stdin.readableLength).toBeGreaterThan(0);
   });
 
+  // `status` lists every stored login and resolves no host unless `--host` is given, so it needs the
+  // profile check of its own (`checkProfile`, the real one from `createAuthDeps`): before it lists or
+  // checks anything, with or without `--host`, and with `--json` nothing goes to stdout.
+  it.each([
+    ["no --host", []],
+    ["--host", ["--host", HOST_ARG]],
+    ["--json", ["--json"]],
+    ["--json and --host", ["--json", "--host", HOST_ARG]],
+  ])("refuses an unknown --profile for auth status with exit 64 (%s)", async (_name, extra) => {
+    const h = harness({ stored: [fakeLogin()] });
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    process.exitCode = 0;
+    let printed = "";
+    try {
+      const program = buildProgram({
+        invokedAs: "gxy",
+        makeAuthDeps: (name) => {
+          const real = createAuthDeps(name, () => program.opts());
+          return { ...h.deps, resolveHost: real.resolveHost, checkProfile: real.checkProfile };
+        },
+      });
+      await program.parseAsync(["node", "gxy", "--profile", "typo", "auth", "status", ...extra]);
+      printed = write.mock.calls.map((c) => String(c[0])).join("");
+    } finally {
+      write.mockRestore();
+    }
+    const code = process.exitCode;
+    process.exitCode = 0;
+    expect(code).toBe(64);
+    expect(printed + h.cap.err).toContain("Unknown --profile typo");
+    expect(h.cap.out).toBe("");
+    expect(h.whoamiCalls).toEqual([]);
+  });
+
   // Building the deps opens the credential store, and with it the keyring. `--help` and the operations
   // must never do that (register.ts calls `makeDeps` once per invocation of an `auth` command).
   it("do not build their deps for --help or for an operation", async () => {

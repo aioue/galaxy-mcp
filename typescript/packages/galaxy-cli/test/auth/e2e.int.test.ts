@@ -465,6 +465,23 @@ describe("auth, end to end", () => {
     expect(await readdir(configDir).catch(() => [])).toEqual([]);
   }, 90_000);
 
+  // `status` resolves no host without `--host`, so the unknown profile has to be caught on its own.
+  test("refuses an unknown --profile for `auth status`, with or without --host", async ({
+    galaxy,
+    run,
+    deviceLogin,
+  }) => {
+    expect((await deviceLogin(galaxy)).exitCode).toBe(0);
+    galaxy.requests.length = 0;
+    for (const extra of [[], ["--host", galaxy.baseUrl], ["--json"]]) {
+      const r = await run(["--profile", "typo", "auth", "status", ...extra]);
+      expect(r.exitCode).toBe(64);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toContain("Unknown --profile typo: no such profile in ~/.planemo.yml");
+    }
+    expect(galaxy.requests).toEqual([]);
+  }, 90_000);
+
   test("asks which Galaxy when two are stored", async ({
     galaxy,
     galaxyWith,
