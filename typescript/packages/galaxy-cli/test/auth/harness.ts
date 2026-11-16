@@ -146,7 +146,10 @@ export function harness(
   }
   const whoamiCalls: { baseUrl: string; token: string }[] = [];
   const knobs: Harness["knobs"] = { whoami: { username: "aioue", email: "a@example.org" } };
-  const env: Record<string, string | undefined> = { ...(opts.hostFromEnv ? { GALAXY_URL: opts.hostFromEnv } : {}), ...opts.env };
+  const env: Record<string, string | undefined> = {
+    ...(opts.hostFromEnv ? { GALAXY_URL: opts.hostFromEnv } : {}),
+    ...opts.env,
+  };
   const deps: AuthDeps = {
     store,
     async whoami(baseUrl, token) {
