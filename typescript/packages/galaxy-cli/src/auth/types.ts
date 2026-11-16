@@ -137,8 +137,9 @@ export type AuthErrorKind =
    */
   | "unsupported"
   /**
-   * `put` refused to keep an admin token in the plaintext file (`requireKeyring`), or the person
-   * said no on the approval page.
+   * Two unrelated sources share this kind, and both are exit 77 on purpose: `put` refused to keep
+   * an admin token in the plaintext file (`requireKeyring`), or the person said no on the approval
+   * page. Callers must not use it to tell them apart.
    */
   | "denied"
   /** The user code expired before anyone approved it. */
