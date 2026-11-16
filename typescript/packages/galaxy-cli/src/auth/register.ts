@@ -134,18 +134,7 @@ export function registerAuth(program: Command, makeDeps: (commandName: string) =
     )
     .option("--show-token", "do not mask tokens")
     .action((o: StatusOptions) =>
-      run(async (deps) => {
-        const ac = new AbortController();
-        const onSig = () => {
-          ac.abort();
-        };
-        process.once("SIGINT", onSig);
-        try {
-          return await statusCommand({ ...o, signal: ac.signal }, deps);
-        } finally {
-          process.removeListener("SIGINT", onSig);
-        }
-      }),
+      run((deps) => interruptible((signal) => statusCommand({ ...o, signal }, deps))),
     );
 
   auth
