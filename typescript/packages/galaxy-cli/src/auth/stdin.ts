@@ -110,13 +110,35 @@ export function readSecret(stdin: RawStdin, signal: AbortSignal): Promise<string
     const ok = (t: string) => !t.trim() || isPlainToken(t.trim());
     const cleanup = () => {
       stdin.removeListener("data", onData);
+      stdin.removeListener("end", onEnd);
+      stdin.removeListener("close", onEnd);
+      stdin.removeListener("error", onError);
       signal.removeEventListener("abort", onAbort);
-      stdin.setRawMode(false);
+      // A terminal that has gone away can make either call throw; the read is over regardless.
+      try {
+        stdin.setRawMode(false);
+      } catch {
+        // Nothing left to switch back.
+      }
       stdin.pause();
     };
     const settle = (fn: () => void) => {
       cleanup();
       fn();
+    };
+    const finish = () => {
+      settle(() => {
+        const key = typed.join("");
+        if (ok(key)) resolve(key);
+        else reject(new AuthError("usage", NOT_PLAIN));
+      });
+    };
+    // The terminal went away mid-prompt: what was typed is taken as at Ctrl-D.
+    const onEnd = finish;
+    const onError = (e: Error) => {
+      settle(() => {
+        reject(e);
+      });
     };
     const onAbort = () => {
       settle(() => {
@@ -133,11 +155,7 @@ export function readSecret(stdin: RawStdin, signal: AbortSignal): Promise<string
           return;
         }
         if (ch === "\r" || ch === "\n" || ch === "\x04") {
-          settle(() => {
-            const key = typed.join("");
-            if (ok(key)) resolve(key);
-            else reject(new AuthError("usage", NOT_PLAIN));
-          });
+          finish();
           return;
         }
         if (ch === "\x7f" || ch === "\b") {
@@ -162,6 +180,9 @@ export function readSecret(stdin: RawStdin, signal: AbortSignal): Promise<string
     }
     stdin.setRawMode(true);
     stdin.on("data", onData);
+    stdin.on("end", onEnd);
+    stdin.on("close", onEnd);
+    stdin.on("error", onError);
     stdin.resume();
     signal.addEventListener("abort", onAbort, { once: true });
   });

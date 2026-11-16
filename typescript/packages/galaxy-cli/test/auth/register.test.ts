@@ -3,6 +3,7 @@ import type { Command } from "commander";
 import { createGalaxyContext } from "@galaxyproject/galaxy-ops";
 import { buildProgram } from "../../src/program";
 import { parseScopes } from "../../src/auth/register";
+import { createAuthDeps } from "../../src/auth/deps";
 import { FAKE_TOKEN, HOST, fakeLogin, harness } from "./harness";
 
 const HOST_ARG = "https://dev.galaxy.example.org";
@@ -74,6 +75,18 @@ describe("the auth commands", () => {
     }
   });
 
+  // The login warning that a GALAXY_API_KEY outranks the stored login is the command's own, so
+  // `--quiet` has to reach the command, as it does for the warnings above.
+  it("drop login's GALAXY_API_KEY precedence warning with --quiet", async () => {
+    const login = async (...global: string[]) => {
+      const h = harness({ env: { GALAXY_API_KEY: "irrelevant" }, stdinText: `${FAKE_TOKEN}\n` });
+      await run([...global, "auth", "login", "--with-token", "--host", HOST_ARG], h);
+      return h.cap.err;
+    };
+    expect(await login()).toContain("GALAXY_API_KEY is set and will take precedence");
+    expect(await login("--quiet")).not.toContain("GALAXY_API_KEY is set");
+  });
+
   // A login never takes its host from a profile, so `--profile` does nothing there; the other
   // subcommands do use it (host, and which key `status` reports), so they stay quiet.
   it("warn once that the global --profile is ignored by login only, and not with --quiet", async () => {
@@ -98,6 +111,46 @@ describe("the auth commands", () => {
       await warned("--quiet", "auth", "login", "--host", "https://g.example", "--with-token"),
     ).not.toContain("--profile");
     expect(await warned("auth", "token")).toBe("");
+  });
+
+  // `login` never uses the profile, so a --profile that is not in ~/.planemo.yml changes nothing: it
+  // warns that the profile is ignored, then logs in. The host rule here is the real one
+  // (`createAuthDeps`), over the harness's fake store, whoami and stdin.
+  it("log in despite an unknown --profile, which login only warns is ignored", async () => {
+    const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    process.exitCode = 0;
+    let printed = "";
+    try {
+      const program = buildProgram({
+        invokedAs: "gxy",
+        makeAuthDeps: (name) => ({
+          ...h.deps,
+          resolveHost: createAuthDeps(name, () => program.opts()).resolveHost,
+        }),
+      });
+      await program.parseAsync([
+        "node",
+        "gxy",
+        "--profile",
+        "typo",
+        "auth",
+        "login",
+        "--with-token",
+        "--host",
+        HOST_ARG,
+      ]);
+      printed = write.mock.calls.map((c) => String(c[0])).join("");
+    } finally {
+      write.mockRestore();
+    }
+    const code = process.exitCode;
+    process.exitCode = 0;
+    expect(code).toBe(0);
+    expect(printed).toContain("Warning: --profile is ignored by `gxy auth login`");
+    expect(printed).not.toContain("Unknown --profile");
+    expect(h.cap.err).not.toContain("Unknown --profile");
+    expect(await h.store.list()).toHaveLength(1);
   });
 
   // Building the deps opens the credential store, and with it the keyring. `--help` and the operations
@@ -146,10 +199,11 @@ describe("options", () => {
     const { h } = await run(["auth", "env", "--shell", "fish"]);
     expect(h.cap.out).toContain("set -gx GALAXY_API_KEY");
 
-    const program = contained(buildProgram({ makeAuthDeps: () => harness().deps }));
-    await expect(
-      program.parseAsync(["node", "gxy", "auth", "env", "--shell", "csh"]),
-    ).rejects.toThrow();
+    // One validator: `envCommand`'s, so the exit is the usage code 64 and not commander's 1.
+    const bad = await run(["auth", "env", "--shell", "csh"]);
+    expect(bad.code).toBe(64);
+    expect(bad.h.cap.out).toBe("");
+    expect(bad.h.cap.err).toContain('Unknown shell "csh"');
   });
 
   it("--scopes accumulates across uses, commas and spaces, and reaches the device flow", async () => {
@@ -193,4 +247,51 @@ describe("parseScopes", () => {
     expect(parseScopes("b", parseScopes("a"))).toEqual(["a", "b"]);
     expect(parseScopes("b c,a", ["a", "b"])).toEqual(["a", "b", "c"]);
   });
+});
+
+/** Listeners on each signal before any command ran. */
+const before = {
+  SIGINT: process.listenerCount("SIGINT"),
+  SIGTERM: process.listenerCount("SIGTERM"),
+  SIGHUP: process.listenerCount("SIGHUP"),
+};
+
+// Login and logout end on SIGTERM and SIGHUP as they do on Ctrl-C, with the code a shell reports
+// for the signal. The default for those two is to die at once, which would skip the revocation of a
+// token that was just issued. `process.emit` stands in for the signal: what is tested is that the
+// handlers are registered, abort the command and set the code, then are removed.
+describe("interrupting login and logout", () => {
+  const never = () => new Promise<never>(() => {});
+
+  it.each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+    ["SIGHUP", 129],
+  ] as const)(
+    "login takes the token back and exits %s's code (%i) when it lands during whoami",
+    async (sig, expected) => {
+      const h = harness();
+      h.deps.whoami = () => (process.emit(sig), never());
+      const { code } = await run(["auth", "login", "--host", HOST_ARG], h);
+      expect(code).toBe(expected);
+      expect(h.server.revoked).toEqual([FAKE_TOKEN]);
+      expect(h.cap.err).toContain("Cancelled; the token");
+      expect(process.listenerCount(sig)).toBe(before[sig]);
+    },
+  );
+
+  it.each([
+    ["SIGTERM", 143],
+    ["SIGHUP", 129],
+  ] as const)(
+    "logout stops waiting for the revocation on %s, deletes locally, exits %i",
+    async (sig, expected) => {
+      const h = harness({ stored: [fakeLogin()] });
+      h.server.revoke = () => (process.emit(sig), never());
+      const { code } = await run(["auth", "logout", "--host", HOST_ARG], h);
+      expect(code).toBe(expected);
+      expect(await h.store.get(HOST)).toBeNull();
+      expect(h.cap.err).toContain("Could not revoke the token on the server");
+    },
+  );
 });

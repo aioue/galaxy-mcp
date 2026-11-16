@@ -415,6 +415,17 @@ describe("auth, end to end", () => {
     }, 30_000);
   });
 
+  test(
+    "env with a shell that does not exist exits 64, the usage code",
+    { timeout: 30_000 },
+    async ({ run }) => {
+      const bad = await run(["auth", "env", "--shell", "csh"]);
+      expect(bad.exitCode).toBe(64);
+      expect(bad.stdout).toBe("");
+      expect(bad.stderr).toContain('Unknown shell "csh"');
+    },
+  );
+
   // 76 is EX_PROTOCOL, "remote error in protocol" (exit.ts): Galaxy answered, but not with a device
   // flow. The way out is the hint, a pasted key, spelled with whichever name was run.
   test.for(NAMES)(

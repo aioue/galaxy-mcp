@@ -7,7 +7,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createWhoami, probeGalaxy } from "../../src/auth/whoami";
 import { discover } from "../../src/auth/oauth";
 import { wasAnswered } from "../../src/auth/network";
-import { withUserAgent } from "../../src/auth/user-agent";
 import { startFakeGalaxy, useFakeGalaxies, type FakeGalaxy } from "../support/fake-galaxy";
 import type { BaseUrl } from "../../src/auth/types";
 import { version } from "../../package.json";
@@ -284,6 +283,23 @@ describe("network and TLS failures", () => {
     expect(e.message).toContain("NODE_EXTRA_CA_CERTS");
     expect(e.message).not.toContain("NODE_USE_ENV_PROXY");
   });
+
+  // Node puts the host name in a DNS error's message, so a name containing "ssl" is not a TLS problem.
+  it("a DNS failure for a host named ssl-... is not reported as a certificate problem", async () => {
+    const dnsFailure = (async () => {
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error("getaddrinfo ENOTFOUND ssl-galaxy.example.org"), {
+          code: "ENOTFOUND",
+        }),
+      });
+    }) as unknown as typeof fetch;
+    const e = await authErrorOf(
+      probeGalaxy("https://ssl-galaxy.example.org" as BaseUrl, dnsFailure),
+    );
+    expect(e.kind).toBe("network");
+    expect(e.message).toContain("Could not reach");
+    expect(e.message).not.toContain("secure connection");
+  });
 });
 
 // So a Galaxy admin can tell `gxy` from a browser in their logs (user-agent.ts). The expected value is
@@ -292,7 +308,7 @@ describe("User-Agent", () => {
   it("is gxy/<package version> (galaxy-cli) on whoami, the probe and every OAuth call", async () => {
     const token = galaxy.issueToken();
     await createWhoami()(base(), token);
-    const server = await discover(base(), { fetch: withUserAgent() });
+    const server = await discover(base());
     const pending = await server.startDeviceLogin();
     galaxy.approve(pending.userCode);
     await pending.waitForApproval();

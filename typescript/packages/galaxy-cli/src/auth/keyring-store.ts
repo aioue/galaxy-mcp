@@ -287,7 +287,7 @@ export function childEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Proces
 
 type ChildReply =
   | { ok: true; value: string | boolean | null }
-  | { ok: false; kind: "unavailable" | "not-found" | "failed"; message: string };
+  | { ok: false; kind: "unavailable" | "failed"; message: string };
 
 /**
  * A reply that is complete and has the shape this operation can produce, else undefined. Only the
@@ -313,10 +313,7 @@ function parseReply(op: "get" | "set" | "delete", text: string): ChildReply | un
   }
   if (o.ok === false) {
     const kind = o.kind;
-    if (
-      (kind === "unavailable" || kind === "not-found" || kind === "failed") &&
-      typeof o.message === "string"
-    ) {
+    if ((kind === "unavailable" || kind === "failed") && typeof o.message === "string") {
       return { ok: false, kind, message: o.message };
     }
   }
@@ -470,7 +467,6 @@ export function nativeBackend(opts: NativeBackendOptions = {}): KeyringBackend {
   ) => {
     const r = await call(op, service, account, secret, o?.timeoutMs ?? defaultTimeoutMs);
     if (r.ok) return r.value;
-    if (r.kind === "not-found") return null;
     if (r.kind === "unavailable") throw new KeyringUnavailableError(r.message);
     throw new Error(r.message);
   };

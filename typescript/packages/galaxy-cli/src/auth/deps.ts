@@ -1,4 +1,4 @@
-import { describeKeyReport, keySourceFor, loadSources } from "../config";
+import { describeKeyReport, keySourceFor, loadSources, requireProfile } from "../config";
 import { openBrowser, canOpenBrowser } from "./browser";
 import { resolveHost } from "./host";
 import { discover } from "./oauth";
@@ -40,9 +40,12 @@ export function createAuthDeps(
     // The rule operations use (config.ts), so the two cannot pick different Galaxies. The global
     // `--url` counts as the flag and `--profile` supplies its planemo URL; login ignores `.env`
     // and the profile (see pickHost).
-    resolveHost: (explicit, purpose) => {
+    resolveHost: async (explicit, purpose) => {
       const g = globals();
       const src = loadSources();
+      // Login never reads the profile and already warns that it is ignored, so an unknown name
+      // changes nothing it does; every other purpose refuses one.
+      if (purpose !== "login") requireProfile(g, src);
       return resolveHost({
         explicit: explicit ?? g.url,
         env,

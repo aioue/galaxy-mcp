@@ -245,6 +245,44 @@ describe("login (device flow)", () => {
       expect(note).toBeLessThan(h.cap.err.indexOf("Logging in to"));
     });
 
+    it("names --url as well as --host and GALAXY_URL in the note", async () => {
+      const h = harness({
+        hostFromEnv: HOST_ARG,
+        ignoredLoginHost: { source: "dotenv", url: "https://other.example.org" },
+      });
+      await loginCommand({}, h.deps);
+      expect(h.cap.err).toContain(
+        "login only uses --host, --url or GALAXY_URL from the environment",
+      );
+    });
+
+    it("shows an ignored URL without its credentials, query, fragment or control characters", async () => {
+      const h = harness({
+        hostFromEnv: HOST_ARG,
+        ignoredLoginHost: {
+          source: "dotenv",
+          url: "https://user:pw@other.example.org/galaxy?token=secret#frag",
+        },
+      });
+      await loginCommand({}, h.deps);
+      expect(h.cap.err).toContain("(https://other.example.org/galaxy)");
+      for (const leak of ["user:pw", "pw@", "secret", "frag"]) {
+        expect(h.cap.err).not.toContain(leak);
+      }
+    });
+
+    it("strips terminal escapes from an ignored value that is not a URL", async () => {
+      const h = harness({
+        hostFromEnv: HOST_ARG,
+        ignoredLoginHost: { source: "profile", url: "evil\x1b[2J\x07 host" + "x".repeat(500) },
+      });
+      await loginCommand({}, h.deps);
+      // eslint-disable-next-line no-control-regex
+      expect(h.cap.err).not.toMatch(/[\x00-\x09\x0b-\x1f\x7f]/);
+      expect(h.cap.err).toContain("evil[2J host");
+      expect(h.cap.err).not.toContain("x".repeat(200));
+    });
+
     it.each([
       [
         "when .env names the chosen host, even written differently",
@@ -561,6 +599,26 @@ describe("cancelling with Ctrl-C", () => {
     });
   });
 
+  // A token response with a huge `expires_in` once made `toISOString` throw after the token was issued.
+  describe("with an absurd expires_in", () => {
+    const galaxyOf = useFakeGalaxies();
+
+    it("stores a valid expiry, capped", async () => {
+      const galaxy = await galaxyOf();
+      const h = harness();
+      h.deps.discover = (u: BaseUrl, signal?: AbortSignal) =>
+        discover(u, { signal, minIntervalMs: 0 });
+      const p = loginCommand({ host: galaxy.baseUrl }, h.deps);
+      await vi.waitFor(() => {
+        expect(galaxy.pendingCodes()).toHaveLength(1);
+      });
+      galaxy.approve(galaxy.pendingCodes()[0]!, { expiresIn: 1e20 });
+      expect(await p).toBe(0);
+      const expiresAt = [...h.store.logins.values()][0]?.expiresAt;
+      expect(Number.isNaN(Date.parse(expiresAt!))).toBe(false);
+    });
+  });
+
   it("at the Galaxy URL prompt", async () => {
     const h = harness({ interactive: true });
     const ac = new AbortController();
@@ -570,6 +628,8 @@ describe("cancelling with Ctrl-C", () => {
     });
     ac.abort();
     expectCancelled(h, await p);
+    // The prompt has no newline of its own, so "Cancelled." must not share its line.
+    expect(h.cap.err).toMatch(/Galaxy URL \(for example https:\/\/usegalaxy\.org\): \nCancelled\./);
   });
 
   // The keyring write is the one step that can last (an unlock prompt), and Ctrl-C kills its helper.
@@ -873,6 +933,27 @@ describe("tokens that carry admin rights", () => {
     // The admin put is what makes the store refuse a plaintext fallback.
     expect(h.store.putCalls[0]!.opts).toMatchObject({ requireKeyring: true });
   });
+
+  // Both ways of logging in end in one shared step (login.ts, `storeLogin`); this pins what it
+  // hands the store for an admin, whichever way they came.
+  it.each([
+    ["pasted", true],
+    ["device", false],
+  ])(
+    "(%s) are stored with requireKeyring and the signal, without --insecure-storage",
+    async (_how, withToken) => {
+      const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
+      h.knobs.whoami = admin;
+      const ac = new AbortController();
+      expect(await loginCommand({ host: HOST_ARG, withToken, signal: ac.signal }, h.deps)).toBe(0);
+      expect(h.store.putCalls).toHaveLength(1);
+      expect(h.store.putCalls[0]!.opts).toEqual({
+        insecureStorage: undefined,
+        requireKeyring: true,
+        signal: ac.signal,
+      });
+    },
+  );
 
   it("do not make an ordinary user's login warn", async () => {
     const h = harness();

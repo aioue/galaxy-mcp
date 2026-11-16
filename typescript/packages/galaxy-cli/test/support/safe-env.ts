@@ -28,7 +28,7 @@ process.env.GXY_CONFIG_DIR = join(home, "gxy");
 process.env.GXY_NO_KEYRING = "1";
 
 // Everything under src/ that reads the environment, so a developer's own values cannot change a result.
-// The live values were saved by global-setup.ts for the opt-in smoke test.
+// global-setup.ts passes the live values to the opt-in smoke test through `provide`.
 for (const name of [
   "DBUS_SESSION_BUS_ADDRESS",
   "GALAXY_URL",
