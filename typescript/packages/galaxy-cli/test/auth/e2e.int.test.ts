@@ -355,6 +355,13 @@ describe("auth, end to end", () => {
     }, 30_000);
   });
 
+  test("env with a shell that does not exist exits 64, the usage code", { timeout: 30_000 }, async ({ run }) => {
+    const bad = await run(["auth", "env", "--shell", "csh"]);
+    expect(bad.exitCode).toBe(64);
+    expect(bad.stdout).toBe("");
+    expect(bad.stderr).toContain('Unknown shell "csh"');
+  });
+
   // The way in is `--with-token`, spelled with whichever name was run: 64 is EX_USAGE.
   test.for(NAMES)(
     "login without --with-token, as %s, exits 64 and says to use it under its own name",

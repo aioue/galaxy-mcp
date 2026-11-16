@@ -145,10 +145,11 @@ describe("options", () => {
     const { h } = await run(["auth", "env", "--shell", "fish"]);
     expect(h.cap.out).toContain("set -gx GALAXY_API_KEY");
 
-    const program = contained(buildProgram({ makeAuthDeps: () => harness().deps }));
-    await expect(
-      program.parseAsync(["node", "gxy", "auth", "env", "--shell", "csh"]),
-    ).rejects.toThrow();
+    // One validator: `envCommand`'s, so the exit is the usage code 64 and not commander's 1.
+    const bad = await run(["auth", "env", "--shell", "csh"]);
+    expect(bad.code).toBe(64);
+    expect(bad.h.cap.out).toBe("");
+    expect(bad.h.cap.err).toContain('Unknown shell "csh"');
   });
 
   it("--with-token and --insecure-storage reach login", async () => {
