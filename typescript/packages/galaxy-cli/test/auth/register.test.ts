@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { Command } from "commander";
 import { createGalaxyContext } from "@galaxyproject/galaxy-ops";
 import { buildProgram } from "../../src/program";
+import { createAuthDeps } from "../../src/auth/deps";
 import { FAKE_TOKEN, HOST, fakeLogin, harness } from "./harness";
 
 const HOST_ARG = "https://dev.galaxy.example.org";
@@ -73,6 +74,18 @@ describe("the auth commands", () => {
     }
   });
 
+  // The login warning that a GALAXY_API_KEY outranks the stored login is the command's own, so
+  // `--quiet` has to reach the command, as it does for the warnings above.
+  it("drop login's GALAXY_API_KEY precedence warning with --quiet", async () => {
+    const login = async (...global: string[]) => {
+      const h = harness({ env: { GALAXY_API_KEY: "irrelevant" }, stdinText: `${FAKE_TOKEN}\n` });
+      await run([...global, "auth", "login", "--with-token", "--host", HOST_ARG], h);
+      return h.cap.err;
+    };
+    expect(await login()).toContain("GALAXY_API_KEY is set and will take precedence");
+    expect(await login("--quiet")).not.toContain("GALAXY_API_KEY is set");
+  });
+
   // A login never takes its host from a profile, so `--profile` does nothing there; the other
   // subcommands do use it (host, and which key `status` reports), so they stay quiet.
   it("warn once that the global --profile is ignored by login only, and not with --quiet", async () => {
@@ -97,6 +110,45 @@ describe("the auth commands", () => {
       await warned("--quiet", "auth", "login", "--host", "https://g.example", "--with-token"),
     ).not.toContain("--profile");
     expect(await warned("auth", "token")).toBe("");
+  });
+
+  // `login` refuses a --profile that is not in ~/.planemo.yml like every other command, before it
+  // reads the key on stdin, asks Galaxy anything or stores anything. The host rule here is the real
+  // one (`createAuthDeps`), over the harness's fake store, whoami and stdin.
+  it("refuse an unknown --profile for login before the key is read, checked or stored", async () => {
+    const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    process.exitCode = 0;
+    try {
+      const program = buildProgram({
+        invokedAs: "gxy",
+        makeAuthDeps: (name) => ({
+          ...h.deps,
+          resolveHost: createAuthDeps(name, () => program.opts()).resolveHost,
+        }),
+      });
+      await program.parseAsync([
+        "node",
+        "gxy",
+        "--profile",
+        "typo",
+        "auth",
+        "login",
+        "--with-token",
+        "--host",
+        HOST_ARG,
+      ]);
+    } finally {
+      write.mockRestore();
+    }
+    const code = process.exitCode;
+    process.exitCode = 0;
+    expect(code).toBe(64);
+    expect(h.cap.err).toContain("Unknown --profile typo: no such profile in ~/.planemo.yml");
+    expect(h.whoamiCalls).toEqual([]);
+    expect(await h.store.list()).toEqual([]);
+    // The key is still waiting on stdin: nothing read it.
+    expect(h.stdin.read()?.toString()).toBe(`${FAKE_TOKEN}\n`);
   });
 
   // Building the deps opens the credential store, and with it the keyring. `--help` and the operations
@@ -145,10 +197,11 @@ describe("options", () => {
     const { h } = await run(["auth", "env", "--shell", "fish"]);
     expect(h.cap.out).toContain("set -gx GALAXY_API_KEY");
 
-    const program = contained(buildProgram({ makeAuthDeps: () => harness().deps }));
-    await expect(
-      program.parseAsync(["node", "gxy", "auth", "env", "--shell", "csh"]),
-    ).rejects.toThrow();
+    // One validator: `envCommand`'s, so the exit is the usage code 64 and not commander's 1.
+    const bad = await run(["auth", "env", "--shell", "csh"]);
+    expect(bad.code).toBe(64);
+    expect(bad.h.cap.out).toBe("");
+    expect(bad.h.cap.err).toContain('Unknown shell "csh"');
   });
 
   it("--with-token and --insecure-storage reach login", async () => {

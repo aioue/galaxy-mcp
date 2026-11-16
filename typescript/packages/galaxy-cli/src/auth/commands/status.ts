@@ -1,4 +1,4 @@
-import { checkExpiry, describeExpiry } from "../expiry";
+import { checkExpiry, describeExpiry, formatExpiry } from "../expiry";
 import {
   AuthError,
   type AuthDeps,
@@ -6,16 +6,8 @@ import {
   type LoginSummary,
   type StoredLogin,
 } from "../types";
-import {
-  fail,
-  formatExpiry,
-  formatTimeLeft,
-  hostOf,
-  maskToken,
-  describeStorage,
-  sanitize,
-} from "./common";
-import { abortReason } from "../abort";
+import { fail, formatTimeLeft, hostOf, maskToken, describeStorage, sanitize } from "./common";
+import { untilAborted } from "../abort";
 
 export interface StatusOptions {
   host?: string;
@@ -30,23 +22,6 @@ export interface StatusOptions {
 const CHECK_TIMEOUT_MS = 10_000;
 /** 128 + SIGINT, which is what a shell reports for a process that Ctrl-C ended. */
 const EX_INTERRUPTED = 130;
-
-/** Settle with `p`, or reject as soon as `signal` aborts (the work behind `p` is left to end on its own). */
-function abortable<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    if (signal.aborted) {
-      reject(abortReason(signal));
-      return;
-    }
-    const onAbort = () => {
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    p.then(resolve, reject).finally(() => {
-      signal.removeEventListener("abort", onAbort);
-    });
-  });
-}
 
 /** `unavailable`: the record is there but its token cannot be read (keyring down, secret gone). */
 type State = "ok" | "expired" | "invalid" | "error" | "unavailable";
@@ -98,6 +73,8 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
     }
 
     const now = deps.now();
+    // Ended when this command returns on a failure, so the other hosts' requests do not outlive it.
+    const stop = new AbortController();
     /** One host's check; `undefined` when Ctrl-C ended it. */
     const check = async (summary: LoginSummary): Promise<Checked | undefined> => {
       // Each host on its own: one unreadable token must not hide the others.
@@ -134,9 +111,9 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
       }
       const timeoutMs = opts.timeoutMs ?? CHECK_TIMEOUT_MS;
       const timeout = AbortSignal.timeout(timeoutMs);
-      const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+      const signal = AbortSignal.any([...(opts.signal ? [opts.signal] : []), stop.signal, timeout]);
       try {
-        const who = await abortable(deps.whoami(login.baseUrl, login.token, signal), signal);
+        const who = await untilAborted(deps.whoami(login.baseUrl, login.token, signal), signal);
         return {
           login,
           state: "ok",
@@ -144,7 +121,7 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
           ...(who.isAdmin !== undefined ? { isAdmin: who.isAdmin } : {}),
         };
       } catch (e) {
-        if (opts.signal?.aborted) return undefined;
+        if (opts.signal?.aborted || stop.signal.aborted) return undefined;
         if (timeout.aborted) {
           return {
             login,
@@ -166,30 +143,16 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
     };
     // All at once, so N unreachable Galaxies cost one timeout and not N; `checked` keeps the order
     // of `summaries`, which is the order the report is printed in.
-    const results = await Promise.all(summaries.map((summary) => check(summary)));
-    if (results.includes(undefined)) {
-      err("Cancelled.");
-      return EX_INTERRUPTED;
-    }
+/** `unavailable`: the record is there but its token cannot be read (keyring down, secret gone). */
+type State = "ok" | "expired" | "invalid" | "error" | "unavailable";
     const checked = results as Checked[];
     // What an operation run now would use for each Galaxy: a login on the list is not always the key
     // in use (config.ts ranks `--api-key`, `--profile` and `GALAXY_API_KEY` above it, `.env` below),
     // and the flags or environment may send operations to another Galaxy altogether, in which case
     // no source is named for this one.
     const rows = checked.map((c) => {
-      const { token } = c.login;
-      const asked = deps.keySourceFor?.(
-        c.login.baseUrl,
-        token === undefined ? undefined : { ...c.login, token },
-        stored,
-      );
-      const key: { id: KeySourceId | null; label: string } =
-        asked ??
-        (deps.env.GALAXY_API_KEY
-          ? { id: "env", label: "GALAXY_API_KEY" }
-          : token === undefined
-            ? { id: null, label: "none (the stored token cannot be read)" }
-            : { id: "stored", label: "stored login" });
+/** `unavailable`: the record is there but its token cannot be read (keyring down, secret gone). */
+type State = "ok" | "expired" | "invalid" | "error" | "unavailable";
       return { c, key };
     });
 
@@ -212,10 +175,13 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
       return 0;
     }
 
-    // Said first, because a green login below it can be about a key nothing is using.
+    // Said first, because a green login below it can be about a key nothing is using. `.env` is left
+    // out: it ranks below a stored login and is used only when that login cannot be (said per login).
     const outranking = [
       ...new Set(
-        rows.filter((r) => r.key.id !== null && r.key.id !== "stored").map((r) => r.key.label),
+        rows
+          .filter((r) => r.key.id !== null && r.key.id !== "stored" && r.key.id !== "dotenv")
+          .map((r) => r.key.label),
       ),
     ];
     if (outranking.length)
@@ -243,6 +209,8 @@ export async function statusCommand(opts: StatusOptions, deps: AuthDeps): Promis
       // Masked on stderr always: the secret itself, when asked for, goes to stdout.
       err(`  Token    ${l.token === undefined ? "unavailable" : maskToken(l.token)}`);
       err(`  Key used by operations: ${sanitize(key.label)}`);
+      if (key.id === "dotenv")
+        err("  ! The .env key is used instead, because this login cannot be used (see above).");
       if (c.isAdmin)
         err(
           `  ! This token carries full admin rights on ${hostOf(l.baseUrl)}. Treat it like a password.`,

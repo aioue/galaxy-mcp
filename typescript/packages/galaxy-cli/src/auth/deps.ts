@@ -1,4 +1,4 @@
-import { describeKeyReport, keySourceFor, loadSources } from "../config";
+import { describeKeyReport, keySourceFor, loadSources, requireProfile } from "../config";
 import { resolveHost } from "./host";
 import { createCredentialStore } from "./store";
 import type { AuthDeps } from "./types";
@@ -27,9 +27,12 @@ export function createAuthDeps(
     // The rule operations use (config.ts), so the two cannot pick different Galaxies. The global
     // `--url` counts as the flag and `--profile` supplies its planemo URL; login ignores `.env`
     // and the profile (see pickHost).
-    resolveHost: (explicit, purpose) => {
+    resolveHost: async (explicit, purpose) => {
       const g = globals();
       const src = loadSources();
+      // Every purpose refuses a --profile that does not exist, login included: it never takes its
+      // host from the profile, but a typo there is still a mistake to report, before a key is read.
+      requireProfile(g, src);
       return resolveHost({
         explicit: explicit ?? g.url,
         env,

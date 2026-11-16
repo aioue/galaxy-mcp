@@ -59,5 +59,5 @@ const AUTH_MAP: Record<AuthErrorKind, number> = {
 };
 
 export function exitCodeForAuthError(kind: AuthErrorKind): number {
-  return AUTH_MAP[kind] ?? EX_SOFTWARE;
+  return AUTH_MAP[kind];
 }

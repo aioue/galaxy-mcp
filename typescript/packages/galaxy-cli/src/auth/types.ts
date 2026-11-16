@@ -175,10 +175,9 @@ export interface AuthDeps {
    * Which source an operation run now would take its key from for this Galaxy (`config.ts`'s
    * order, with the flags and environment of this run), with the text to show for it. `id` is
    * null when the operation would go to another Galaxy or would not run, and the label says so.
-   * `stored` is every stored login's base URL. Absent means a stored login, or `GALAXY_API_KEY`
-   * when it is set.
+   * `stored` is every stored login's base URL.
    */
-  keySourceFor?(
+  keySourceFor(
     baseUrl: BaseUrl,
     login: StoredLogin | undefined,
     stored: readonly BaseUrl[],

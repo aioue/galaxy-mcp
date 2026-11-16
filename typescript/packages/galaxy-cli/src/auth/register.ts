@@ -72,7 +72,10 @@ export function registerAuth(program: Command, makeDeps: (commandName: string) =
         };
         process.once("SIGINT", onSig);
         try {
-          return await loginCommand({ ...o, signal: ac.signal }, deps);
+          return await loginCommand(
+            { ...o, signal: ac.signal, quiet: program.opts<{ quiet?: boolean }>().quiet },
+            deps,
+          );
         } finally {
           process.removeListener("SIGINT", onSig);
         }
@@ -114,7 +117,10 @@ export function registerAuth(program: Command, makeDeps: (commandName: string) =
     .command("env")
     .description("Print GALAXY_URL and GALAXY_API_KEY assignments, for eval")
     .addOption(host())
-    .addOption(new Option("--shell <shell>", "shell syntax").choices([...SHELLS]).default("sh"))
+    .addOption(
+      // Checked by `envCommand`, so a bad value is a usage error (64) like the other commands'.
+      new Option("--shell <shell>", `shell syntax: ${SHELLS.join(", ")}`).default("sh"),
+    )
     .action((o: EnvOptions) => run((deps) => envCommand(o, deps)));
 
   auth

@@ -363,6 +363,17 @@ describe("auth, end to end", () => {
     }, 30_000);
   });
 
+  test(
+    "env with a shell that does not exist exits 64, the usage code",
+    { timeout: 30_000 },
+    async ({ run }) => {
+      const bad = await run(["auth", "env", "--shell", "csh"]);
+      expect(bad.exitCode).toBe(64);
+      expect(bad.stdout).toBe("");
+      expect(bad.stderr).toContain('Unknown shell "csh"');
+    },
+  );
+
   // The way in is `--with-token`, spelled with whichever name was run: 64 is EX_USAGE.
   test.for(NAMES)(
     "login without --with-token, as %s, exits 64 and says to use it under its own name",
@@ -571,6 +582,24 @@ describe("auth, end to end", () => {
       expect(login.exitCode, login.stderr).toBe(64);
       expect(decoy.requests).toEqual([]);
       expect(login.stdout + login.stderr).not.toContain(token);
+      await expect(readFile(join(configDir, "hosts.yml"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }, 30_000);
+
+    test("login --profile with a name that is not in ~/.planemo.yml exits 64 before anything is sent or stored", async ({
+      galaxy,
+      run,
+      configDir,
+    }) => {
+      const token = galaxy.issueToken();
+      const login = await run(
+        ["--profile", "typo", "auth", "login", "--host", galaxy.baseUrl, "--with-token"],
+        { input: `${token}\n` },
+      );
+      expect(login.exitCode, login.stderr).toBe(64);
+      expect(login.stderr).toContain("Unknown --profile typo: no such profile in ~/.planemo.yml");
+      expect(galaxy.requests).toEqual([]);
       await expect(readFile(join(configDir, "hosts.yml"), "utf8")).rejects.toMatchObject({
         code: "ENOENT",
       });
