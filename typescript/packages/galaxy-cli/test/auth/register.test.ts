@@ -126,7 +126,10 @@ describe("the auth commands", () => {
         invokedAs: "gxy",
         makeAuthDeps: (name) => {
           const real = createAuthDeps(name, () => program.opts());
-          return { ...h.deps, resolveHost: (explicit, purpose) => real.resolveHost(explicit, purpose) };
+          return {
+            ...h.deps,
+            resolveHost: (explicit, purpose) => real.resolveHost(explicit, purpose),
+          };
         },
       });
       await program.parseAsync([
