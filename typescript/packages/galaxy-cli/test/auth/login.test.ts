@@ -934,6 +934,27 @@ describe("tokens that carry admin rights", () => {
     expect(h.store.putCalls[0]!.opts).toMatchObject({ requireKeyring: true });
   });
 
+  // Both ways of logging in end in one shared step (login.ts, `storeLogin`); this pins what it
+  // hands the store for an admin, whichever way they came.
+  it.each([
+    ["pasted", true],
+    ["device", false],
+  ])(
+    "(%s) are stored with requireKeyring and the signal, without --insecure-storage",
+    async (_how, withToken) => {
+      const h = harness({ stdinText: `${FAKE_TOKEN}\n` });
+      h.knobs.whoami = admin;
+      const ac = new AbortController();
+      expect(await loginCommand({ host: HOST_ARG, withToken, signal: ac.signal }, h.deps)).toBe(0);
+      expect(h.store.putCalls).toHaveLength(1);
+      expect(h.store.putCalls[0]!.opts).toEqual({
+        insecureStorage: undefined,
+        requireKeyring: true,
+        signal: ac.signal,
+      });
+    },
+  );
+
   it("do not make an ordinary user's login warn", async () => {
     const h = harness();
     await loginCommand({ host: HOST_ARG }, h.deps);
