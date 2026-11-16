@@ -124,10 +124,10 @@ describe("the auth commands", () => {
     try {
       const program = buildProgram({
         invokedAs: "gxy",
-        makeAuthDeps: (name) => ({
-          ...h.deps,
-          resolveHost: createAuthDeps(name, () => program.opts()).resolveHost,
-        }),
+        makeAuthDeps: (name) => {
+          const real = createAuthDeps(name, () => program.opts());
+          return { ...h.deps, resolveHost: (explicit, purpose) => real.resolveHost(explicit, purpose) };
+        },
       });
       await program.parseAsync([
         "node",
