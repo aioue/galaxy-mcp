@@ -1,0 +1,23 @@
+
+######## CASE L5a: REAL keypress Ctrl-C (QMP) while the unlock prompt is up
+  login collection locked: True
+  CHECK PASS: keyring locked
+$ [tty-stderr] /opt/node/22.19.0/bin/node /mnt/builds/da99d9b786426bda1768a776cab723f2f32fccfc-node22/typescript/packages/galaxy-cli/dist/gxy.js auth login --host http://127.0.0.1:40439 --with-token  <<< stdin
+  CHECK PASS: dialog [Ww]allet appeared []
+  CHECK PASS: real Ctrl-C keypress via the actor
+  stderr| Logging in to 127.0.0.1:40439
+  stderr| Waiting for the system keyring (unlock it if asked)...
+  stderr| ! No system keyring available (The system keyring did not answer a set within 60000 ms); token saved in plain text at /tmp/gxyr._hkx3ysu/cfg/gxy/hosts.yml (readable only by you)
+  stderr| ✓ Logged in to 127.0.0.1:40439 as fake-user
+  stderr| ✓ Token stored in a file readable only by you (no expiry)
+  stderr| ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.
+  stderr| [tty-stderr] exit=0 elapsed=60.30s
+  [exit 0, 60.4s]
+  RECORDED: gxy exit code after the real Ctrl-C: 0
+  RECORDED: time to finish: 60.4s
+  RECORDED: dialog after the keypress: 1: 1
+  CHECK PASS: no keyring-child helper process left
+  CHECK FAIL: expect: exit of login in [130] (got 0)
+  CHECK FAIL: expect: output of login contains 'Cancelled.'
+  CHECK PASS: expect: login took <= 100s (60.4)
+== CASE RESULT L5a: FAIL (expect: exit of login in [130] (got 0); expect: output of login contains 'Cancelled.')

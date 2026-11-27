@@ -1,0 +1,9 @@
+
+######## CASE L9d: no-echo prompt in a real terminal window: typed with real keypresses (extra, the 'real-keypress variant')
+$ [gui-terminal] /opt/node/22.19.0/bin/node /mnt/builds/8152f133e4ed252b36d2668c53476824885d3ec6-node22/typescript/packages/galaxy-cli/dist/gxy.js auth login --host http://127.0.0.1:40615 --with-token
+  CHECK FAIL: run finished within its 60s bound
+  [exit 124, 60.3s]
+  CHECK FAIL: exit login == 0
+  CHECK FAIL: keyring: count 0 (want 1), holds the expected token
+  CHECK FAIL: expect: exit of login in [0] (got 124)
+== CASE RESULT L9d: FAIL (run finished within its 60s bound; exit login == 0; keyring: count 0 (want 1), holds the expected token; expect: exit of login in [0] (got 124))

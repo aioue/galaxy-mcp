@@ -1,0 +1,16 @@
+
+######## CASE W7: paths with spaces; over 260 characters with LongPathsEnabled 0 and 1 (set by SYSTEM)
+$ [pipe] gxy auth login --host http://127.0.0.1:50057 --with-token  <<< stdin
+  stderr| Logging in to 127.0.0.1:50057
+  stderr| Galaxy did not accept the token: it may be invalid, replaced by a newer API key, expired, or belong to a deactivated account.
+  [exit 77, 0.3s]
+  RECORDED: hosts.yml written under GXY_CONFIG_DIR (63 characters): False
+  CHECK FAIL: exit login == 0
+  CHECK PASS: HKLM LongPathsEnabled is 0 (the job sets it; recorded)
+$ [pipe] gxy auth login --host http://127.0.0.1:50057 --with-token  <<< stdin
+  stderr| Logging in to 127.0.0.1:50057
+  stderr| Galaxy did not accept the token: it may be invalid, replaced by a newer API key, expired, or belong to a deactivated account.
+  [exit 77, 0.3s]
+  RECORDED: hosts.yml written under GXY_CONFIG_DIR (358 characters): False
+  RECORDED: works, or fails naming the path: 77 (Logging in to 127.0.0.1:50057 / Galaxy did not accept the token: it may be invalid, replaced by a newer API key, expired, or belong to a deactivated account.)
+== CASE RESULT W7: FAIL (exit login == 0)

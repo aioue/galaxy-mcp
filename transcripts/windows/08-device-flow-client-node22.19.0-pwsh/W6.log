@@ -1,0 +1,54 @@
+
+######## CASE W6: ACLs under the profile and under C:\gxy-shared\cfg (icacls)
+$ [pipe] gxy auth login --host http://127.0.0.1:53261 --with-token  <<< stdin
+  stderr| Logging in to 127.0.0.1:53261
+  stderr| ✓ Logged in to 127.0.0.1:53261 as fake-user
+  stderr| ✓ Token stored in the system keyring (no expiry)
+  stderr| ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.
+  [exit 0, 0.4s]
+  --- icacls C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg
+  | C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)
+  |                                                        BUILTIN\Administrators:(I)(OI)(CI)(F)
+  |                                                        WIN-HOST\tester:(I)(OI)(CI)(F)
+  | 
+  | Successfully processed 1 files; Failed processing 0 files
+  --- icacls C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg\hosts.yml
+  | C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg\hosts.yml NT AUTHORITY\SYSTEM:(I)(F)
+  |                                                                  BUILTIN\Administrators:(I)(F)
+  |                                                                  WIN-HOST\tester:(I)(F)
+  | 
+  | Successfully processed 1 files; Failed processing 0 files
+  (seeded a file-stored login in C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg-file for the ACL check: exit 0)
+  --- icacls C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg-file
+  | C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg-file NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)
+  |                                                             BUILTIN\Administrators:(I)(OI)(CI)(F)
+  |                                                             WIN-HOST\tester:(I)(OI)(CI)(F)
+  | 
+  | Successfully processed 1 files; Failed processing 0 files
+  --- icacls C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg-file\hosts.yml
+  | C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg-file\hosts.yml NT AUTHORITY\SYSTEM:(I)(F)
+  |                                                                       BUILTIN\Administrators:(I)(F)
+  |                                                                       WIN-HOST\tester:(I)(F)
+  | 
+  | Successfully processed 1 files; Failed processing 0 files
+  RECORDED: icacls output for the config dir and hosts.yml: [C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg] no ACE grants read to Users/Everyone/Authenticated Users; hosts.yml holds a token: False; dir ACEs: C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F) ; BUILTIN\Administrators:(I)(OI)(CI)(F) ; WIN-HOST\tester:(I)(OI)(CI)(F) ; Successfully processed 1 files; Failed processing 0 files || [C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg-file, file-stored token] no ACE grants read to Users/Everyone/Authenticated Users; hosts.yml holds a token: True; dir ACEs: C:\Users\tester\AppData\Local\Temp\1\gxyr-179e2cb5\cfg-file NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F) ; BUILTIN\Administrators:(I)(OI)(CI)(F) ; WIN-HOST\tester:(I)(OI)(CI)(F) ; Successfully processed 1 files; Failed processing 0 files
+  (seeded a file-stored login in C:\gxy-shared\cfg for the ACL check: exit 0)
+  --- icacls C:\gxy-shared\cfg
+  | C:\gxy-shared\cfg NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)
+  |                   BUILTIN\Administrators:(I)(OI)(CI)(F)
+  |                   BUILTIN\Users:(I)(OI)(CI)(RX)
+  |                   BUILTIN\Users:(I)(CI)(AD)
+  |                   BUILTIN\Users:(I)(CI)(WD)
+  |                   WIN-HOST\tester:(I)(F)
+  |                   CREATOR OWNER:(I)(OI)(CI)(IO)(F)
+  | 
+  | Successfully processed 1 files; Failed processing 0 files
+  --- icacls C:\gxy-shared\cfg\hosts.yml
+  | C:\gxy-shared\cfg\hosts.yml NT AUTHORITY\SYSTEM:(I)(F)
+  |                             BUILTIN\Administrators:(I)(F)
+  |                             BUILTIN\Users:(I)(RX)
+  |                             WIN-HOST\tester:(I)(F)
+  | 
+  | Successfully processed 1 files; Failed processing 0 files
+  RECORDED: icacls C:\gxy-shared\cfg: [C:\gxy-shared\cfg, file-stored token] FLAG: Users/Everyone/Authenticated Users can read (file: BUILTIN\Users:(I)(RX); dir: BUILTIN\Users:(I)(OI)(CI)(RX)) and hosts.yml holds a plaintext token, so "readable only by you" does not hold here; hosts.yml holds a token: True; dir ACEs: C:\gxy-shared\cfg NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F) ; BUILTIN\Administrators:(I)(OI)(CI)(F) ; BUILTIN\Users:(I)(OI)(CI)(RX) ; BUILTIN\Users:(I)(CI)(AD) ; BUILTIN\Users:(I)(CI)(WD) ; WIN-HOST\tester:(I)(F)
+== CASE RESULT W6: PASS

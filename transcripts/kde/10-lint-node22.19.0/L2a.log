@@ -1,0 +1,38 @@
+
+######## CASE L2a: login over an existing keyring login, same user
+$ [pipe] /opt/node/22.19.0/bin/node /mnt/builds/d083c2ec004cd3574ef552595fc71d957af5de29-node22/typescript/packages/galaxy-cli/dist/gxy.js auth login --host http://127.0.0.1:32917 --with-token  <<< stdin
+  stderr| Logging in to 127.0.0.1:32917
+  stderr| ✓ Logged in to 127.0.0.1:32917 as fake-user
+  stderr| ✓ Token stored in the system keyring (no expiry)
+  stderr| ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.
+  [exit 0, 0.4s]
+$ secret-tool search --all service gxy:http://127.0.0.1:32917
+  | [/2]
+  | label = keyring:fake-user@gxy:http://127.0.0.1:32917
+  | secret = <35 chars>
+  | modified = 2026-11-27 06:21:25
+  | attribute.username = fake-user
+$ [pipe] /opt/node/22.19.0/bin/node /mnt/builds/d083c2ec004cd3574ef552595fc71d957af5de29-node22/typescript/packages/galaxy-cli/dist/gxy.js auth login --host http://127.0.0.1:32917 --with-token  <<< stdin
+  stderr| Logging in to 127.0.0.1:32917
+  stderr| ✓ Logged in to 127.0.0.1:32917 as fake-user
+  stderr| ✓ Token stored in the system keyring (no expiry)
+  stderr| ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.
+  [exit 0, 0.5s]
+  CHECK PASS: exit second == 0
+  CHECK FAIL: keyring: count 1 (want 1), holds the expected token, username fake-user, old token absent
+  CHECK PASS: second does not contain 'may remain' in any
+  CHECK PASS: hosts.yml does not contain 'token'
+$ [pipe] /opt/node/22.19.0/bin/node /mnt/builds/d083c2ec004cd3574ef552595fc71d957af5de29-node22/typescript/packages/galaxy-cli/dist/gxy.js auth token
+  stdout| fake-smoke-token-B-0123456789abcdef
+  [exit 0, 0.3s]
+  CHECK PASS: stdout of token is the expected token
+$ secret-tool search --all service gxy:http://127.0.0.1:32917
+  | [/2]
+  | label = keyring:fake-user@gxy:http://127.0.0.1:32917
+  | secret = <35 chars>
+  | modified = 2026-11-27 06:21:25
+  | attribute.username = fake-user
+  CHECK PASS: expect: exit of second in [0] (got 0)
+  CHECK PASS: expect: keyring has 1 item(s) (got 1)
+  CHECK PASS: expect: keyring holds the expected token
+== CASE RESULT L2a: FAIL (keyring: count 1 (want 1), holds the expected token, username fake-user, old token absent)

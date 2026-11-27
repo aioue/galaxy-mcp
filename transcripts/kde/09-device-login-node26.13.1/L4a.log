@@ -1,0 +1,37 @@
+
+######## CASE L4a: GXY_NO_KEYRING=1 over an existing keyring login
+$ [pipe] /opt/node/26.13.1/bin/node /mnt/builds/8152f133e4ed252b36d2668c53476824885d3ec6-node26/typescript/packages/galaxy-cli/dist/gxy.js auth login --host http://127.0.0.1:33307 --with-token  <<< stdin
+  stderr| Logging in to 127.0.0.1:33307
+  stderr| ! No system keyring available (Platform failure: DBus error: Client public key size is invalid); token saved in plain text at /tmp/gxyr.otbzs4kh/cfg/gxy/hosts.yml (readable only by you)
+  stderr| ✓ Logged in to 127.0.0.1:33307 as fake-user
+  stderr| ✓ Token stored in a file readable only by you (no expiry)
+  stderr| ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.
+  [exit 0, 0.4s]
+$ [pipe] /opt/node/26.13.1/bin/node /mnt/builds/8152f133e4ed252b36d2668c53476824885d3ec6-node26/typescript/packages/galaxy-cli/dist/gxy.js auth login --host http://127.0.0.1:33307 --with-token  <<< stdin
+  stderr| Logging in to 127.0.0.1:33307
+  stderr| ! GXY_NO_KEYRING is set; token saved in plain text at /tmp/gxyr.otbzs4kh/cfg/gxy/hosts.yml (readable only by you)
+  stderr| ✓ Logged in to 127.0.0.1:33307 as fake-user
+  stderr| ✓ Token stored in a file readable only by you (no expiry)
+  stderr| ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.
+  [exit 0, 0.4s]
+  CHECK FAIL: exit blocked == 64
+  CHECK FAIL: blocked contains 'Rerun without GXY_NO_KEYRING' in any
+$ [pipe] /opt/node/26.13.1/bin/node /mnt/builds/8152f133e4ed252b36d2668c53476824885d3ec6-node26/typescript/packages/galaxy-cli/dist/gxy.js auth logout
+  stderr| ✓ Removed the stored API key for 127.0.0.1:33307
+  stderr| ! The key itself was not revoked, as it may be in use elsewhere. It still works until you revoke it in Galaxy's user preferences: http://127.0.0.1:33307/user/api_key
+  [exit 0, 0.3s]
+  CHECK FAIL: exit blocked-logout == 64
+$ [pipe] /opt/node/26.13.1/bin/node /mnt/builds/8152f133e4ed252b36d2668c53476824885d3ec6-node26/typescript/packages/galaxy-cli/dist/gxy.js auth token
+  stderr| Not logged in; run gxy auth login --host <url>
+  [exit 77, 0.3s]
+  CHECK PASS: exit blocked-token == 77
+  CHECK FAIL: hosts.yml and the keyring are unchanged since before
+  CHECK FAIL: keyring: count 0 (want 1), holds the expected token
+  CHECK PASS: the token is in no file under the config dir / HOME (0 hits: )
+$ [pipe] /opt/node/26.13.1/bin/node /mnt/builds/8152f133e4ed252b36d2668c53476824885d3ec6-node26/typescript/packages/galaxy-cli/dist/gxy.js auth logout
+  stderr| No Galaxy given and none logged in. Pass --host <url>.
+  [exit 64, 0.3s]
+  CHECK FAIL: exit logout == 0
+  CHECK PASS: keyring: count 0 (want 0)
+  CHECK FAIL: expect: exit of blocked in [64] (got 0)
+== CASE RESULT L4a: FAIL (exit blocked == 64; blocked contains 'Rerun without GXY_NO_KEYRING' in any; exit blocked-logout == 64; hosts.yml and the keyring are unchanged since before; keyring: count 0 (want 1), holds the expected token; exit logout == 0; expect: exit of blocked in [64] (got 0))

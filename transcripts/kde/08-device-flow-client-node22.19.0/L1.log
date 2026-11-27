@@ -1,0 +1,60 @@
+
+######## CASE L1: login, token, status, logout through the keyring; hosts: {} after logout (nit 5)
+$ [pipe] /opt/node/22.19.0/bin/node /mnt/builds/f73c88d84cd0bba3e67fbfb3a666c27063addce1-node22/typescript/packages/galaxy-cli/dist/gxy.js auth login --host http://127.0.0.1:46067 --with-token  <<< stdin
+  stderr| Logging in to 127.0.0.1:46067
+  stderr| ✓ Logged in to 127.0.0.1:46067 as fake-user
+  stderr| ✓ Token stored in the system keyring (no expiry)
+  stderr| ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.
+  [exit 0, 0.6s]
+  CHECK PASS: exit login == 0
+  CHECK PASS: login contains 'system keyring' in any
+  CHECK PASS: hosts.yml contains 'storage: keyring'
+  CHECK PASS: hosts.yml does not contain 'token'
+  CHECK PASS: the token is in no file under the config dir / HOME (0 hits: )
+  CHECK PASS: keyring: count 1 (want 1), holds the expected token, username fake-user
+$ secret-tool search --all service gxy:http://127.0.0.1:46067
+  | [/1]
+  | label = keyring:fake-user@gxy:http://127.0.0.1:46067
+  | secret = <35 chars>
+  | modified = 2026-11-27 05:52:05
+  | attribute.username = fake-user
+$ [pipe] /opt/node/22.19.0/bin/node /mnt/builds/f73c88d84cd0bba3e67fbfb3a666c27063addce1-node22/typescript/packages/galaxy-cli/dist/gxy.js auth token
+  stdout| fake-smoke-token-A-0123456789abcdef
+  [exit 0, 0.3s]
+  CHECK PASS: exit token == 0
+  CHECK PASS: stdout of token is the expected token
+$ [pipe] /opt/node/22.19.0/bin/node /mnt/builds/f73c88d84cd0bba3e67fbfb3a666c27063addce1-node22/typescript/packages/galaxy-cli/dist/gxy.js auth status
+  stderr| 127.0.0.1:46067
+  stderr|   ✓ Logged in as fake-user
+  stderr|   Storage  system keyring
+  stderr|   Method   pasted API key
+  stderr|   Scopes   full access (API key)
+  stderr|   Expires  no expiry
+  stderr|   Token    ********cdef
+  stderr|   Key used by operations: stored login
+  stderr|   ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.
+  [exit 0, 0.3s]
+  CHECK PASS: exit status == 0
+  CHECK PASS: status contains 'system keyring' in any
+$ [pipe] /opt/node/22.19.0/bin/node /mnt/builds/f73c88d84cd0bba3e67fbfb3a666c27063addce1-node22/typescript/packages/galaxy-cli/dist/gxy.js auth logout
+  stderr| ! Could not remove the stored API key for 127.0.0.1:46067.
+  stderr| ! The key itself was not revoked, as it may be in use elsewhere. It still works until you revoke it in Galaxy's user preferences: http://127.0.0.1:46067/user/api_key
+  stderr| ! The login record was removed, but the system keyring could not confirm that the secret for http://127.0.0.1:46067 (user fake-user) is gone, so it may remain there: Platform failure: DBus error: Client public key size is invalid. Remove the entry "gxy:http://127.0.0.1:46067" for that user with your keyring's own tool
+  [exit 1, 0.4s]
+  CHECK FAIL: exit logout == 0
+  CHECK PASS: keyring: count 0 (want 0)
+  CHECK PASS: hosts.yml does not contain 'http://127.0.0.1:46067'
+  RECORDED: nit 5: hosts.yml remains as 'hosts: {}' after logout: True
+$ [pipe] /opt/node/22.19.0/bin/node /mnt/builds/f73c88d84cd0bba3e67fbfb3a666c27063addce1-node22/typescript/packages/galaxy-cli/dist/gxy.js auth status
+  stderr| No stored logins. Run: gxy auth login --host <url>
+  [exit 77, 0.3s]
+  RECORDED: status after logout (documented 77): 77
+$ [pipe] /opt/node/22.19.0/bin/node /mnt/builds/f73c88d84cd0bba3e67fbfb3a666c27063addce1-node22/typescript/packages/galaxy-cli/dist/gxy.js auth token
+  stderr| Not logged in; run gxy auth login --host <url>
+  [exit 77, 0.3s]
+  CHECK PASS: auth token after logout fails
+  CHECK PASS: expect: exit of login in [0] (got 0)
+  CHECK PASS: expect: hosts.yml exists
+  CHECK PASS: expect: hosts.yml contains 'hosts: {}'
+  CHECK PASS: expect: keyring has 0 item(s) (got 0)
+== CASE RESULT L1: FAIL (exit logout == 0)

@@ -1,0 +1,34 @@
+
+######## CASE L2a: login over an existing keyring login, same user
+$ [pipe] /opt/node/26.13.1/bin/node /mnt/builds/f73c88d84cd0bba3e67fbfb3a666c27063addce1-node26/typescript/packages/galaxy-cli/dist/gxy.js auth login --host http://127.0.0.1:38249 --with-token  <<< stdin
+  stderr| Logging in to 127.0.0.1:38249
+  stderr| ✓ Logged in to 127.0.0.1:38249 as fake-user
+  stderr| ✓ Token stored in the system keyring (no expiry)
+  stderr| ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.
+  [exit 0, 0.5s]
+$ secret-tool search --all service gxy:http://127.0.0.1:38249
+  | [/2]
+  | label = keyring:fake-user@gxy:http://127.0.0.1:38249
+  | secret = <35 chars>
+  | modified = 2026-11-27 05:59:04
+  | attribute.username = fake-user
+$ [pipe] /opt/node/26.13.1/bin/node /mnt/builds/f73c88d84cd0bba3e67fbfb3a666c27063addce1-node26/typescript/packages/galaxy-cli/dist/gxy.js auth login --host http://127.0.0.1:38249 --with-token  <<< stdin
+  stderr| Logging in to 127.0.0.1:38249
+  stderr| ! No system keyring available (The system keyring failed a read: Platform failure: Crypto error: Unpad Error); token saved in plain text at /tmp/gxyr.hj5w0ula/cfg/gxy/hosts.yml (readable only by you)
+  stderr| ✓ Logged in to 127.0.0.1:38249 as fake-user
+  stderr| ✓ Token stored in a file readable only by you (no expiry)
+  stderr| ! This token has no expiry: it works until you revoke it in Galaxy's user preferences.
+  [exit 0, 0.6s]
+  CHECK PASS: exit second == 0
+  CHECK FAIL: keyring: count 0 (want 1), holds the expected token, username fake-user, old token absent
+  CHECK PASS: second does not contain 'may remain' in any
+  CHECK FAIL: hosts.yml does not contain 'token'
+$ [pipe] /opt/node/26.13.1/bin/node /mnt/builds/f73c88d84cd0bba3e67fbfb3a666c27063addce1-node26/typescript/packages/galaxy-cli/dist/gxy.js auth token
+  stdout| fake-smoke-token-B-0123456789abcdef
+  [exit 0, 0.4s]
+  CHECK PASS: stdout of token is the expected token
+$ secret-tool search --all service gxy:http://127.0.0.1:38249
+  CHECK PASS: expect: exit of second in [0] (got 0)
+  CHECK FAIL: expect: keyring has 1 item(s) (got 0)
+  CHECK FAIL: expect: keyring holds the expected token
+== CASE RESULT L2a: FAIL (keyring: count 0 (want 1), holds the expected token, username fake-user, old token absent; hosts.yml does not contain 'token'; expect: keyring has 1 item(s) (got 0); expect: keyring holds the expected token)
